@@ -1,0 +1,14 @@
+# Drop-in example: /etc/systemd/system/handoff-router.service.d/memory.conf
+# (or ~/.config/systemd/user/handoff-router.service.d/memory.conf)
+#
+# RTX 5090 (32 GiB VRAM) host with 64 GiB RAM, largest model ~50 GiB of RSS:
+#   MemoryHigh  begins reclaiming early so the desktop stays usable
+#   MemoryMax   hard cap that keeps the OS alive
+#   MemorySwapMax bounds emergency spill so swap cannot swallow the machine
+#   OOMPolicy=kill makes a killed child tear down the unit, so Restart= brings
+#              the router back in a clean state instead of a retrying parent
+[Service]
+MemoryHigh=52G
+MemoryMax=56G
+MemorySwapMax=8G
+OOMPolicy=kill

@@ -1,0 +1,55 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "handoff-router"
+version = "0.2.0"
+description = "One GPU, many engines: a VRAM-gated backend router for local LLM serving."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Handoff Router contributors" }]
+keywords = [
+    "llm", "local-llm", "llama.cpp", "vllm", "sglang", "strata", "gpu",
+    "model-switching", "openai-compatible", "inference-server",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: System :: Systems Administration",
+]
+dependencies = [
+    "fastapi>=0.115,<1",
+    "httpx>=0.27,<1",
+    "psutil>=5.9,<8",
+    "PyYAML>=6,<7",
+    "uvicorn>=0.30,<1",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-asyncio>=0.23"]
+
+[project.urls]
+Homepage = "https://github.com/your-org/handoff-router"
+Documentation = "https://github.com/your-org/handoff-router/tree/main/docs"
+Issues = "https://github.com/your-org/handoff-router/issues"
+
+[project.scripts]
+handoff-router = "handoff_router.cli:main"
+
+[tool.setuptools]
+packages = ["handoff_router"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

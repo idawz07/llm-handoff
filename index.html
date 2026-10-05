@@ -1,0 +1,425 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Handoff Router — one GPU, many engines</title>
+<meta name="description" content="An OpenAI-compatible facade that supervises llama.cpp, vLLM, SGLang, Strata, or any local model server as backends of one endpoint, and hands a single GPU between them without ever letting two big weight sets overlap.">
+<meta name="color-scheme" content="dark">
+<meta property="og:title" content="Handoff Router — one GPU, many engines">
+<meta property="og:description" content="VRAM-gated backend switching for local LLM serving. Keep llama.cpp's own router; add Strata, vLLM, NInfer, and sidecars on top of it.">
+<style>
+  :root{
+    --bg:#0b0d10; --bg-soft:#11151a; --panel:#141920; --line:#232a33;
+    --ink:#e9edf2; --ink-dim:#a5b0bd; --ink-faint:#7c8794;
+    --accent:#63d2a8; --accent-2:#6cb2ff; --warn:#f0b667;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+    --sans:system-ui,-apple-system,"Segoe UI",Roboto,Inter,sans-serif;
+    --max:1120px;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);line-height:1.65;font-size:16px}
+  a{color:var(--accent-2);text-decoration:none}
+  a:hover{text-decoration:underline}
+  code,kbd{font-family:var(--mono);font-size:.92em}
+  code{background:#1b222b;border:1px solid var(--line);border-radius:5px;padding:.1em .35em}
+  .wrap{max-width:var(--max);margin:0 auto;padding:0 22px}
+  header{position:sticky;top:0;z-index:20;background:rgba(11,13,16,.86);backdrop-filter:blur(10px);border-bottom:1px solid var(--line)}
+  nav{display:flex;align-items:center;gap:22px;height:60px}
+  .brand{display:flex;align-items:center;gap:10px;font-weight:650;letter-spacing:.2px}
+  .dot{width:11px;height:11px;border-radius:50%;background:var(--accent);box-shadow:0 0 0 4px rgba(99,210,168,.14)}
+  nav .links{margin-left:auto;display:flex;gap:20px;flex-wrap:wrap}
+  nav .links a{color:var(--ink-dim);font-size:14.5px}
+  nav .links a:hover{color:var(--ink);text-decoration:none}
+  .btn{display:inline-block;padding:.62em 1.05em;border-radius:8px;font-weight:600;font-size:14.5px;border:1px solid transparent}
+  .btn.primary{background:var(--accent);color:#06231a}
+  .btn.ghost{border-color:var(--line);color:var(--ink)}
+  .btn:hover{text-decoration:none;filter:brightness(1.06)}
+  section{padding:78px 0;border-bottom:1px solid var(--line)}
+  .hero{padding:104px 0 74px;background:
+     radial-gradient(1100px 420px at 12% -10%, rgba(99,210,168,.13), transparent 60%),
+     radial-gradient(760px 340px at 88% 0%, rgba(108,178,255,.11), transparent 62%)}
+  h1{font-size:clamp(2.1rem,5.1vw,3.5rem);line-height:1.1;margin:.15em 0 .35em;letter-spacing:-.02em}
+  h1 em{font-style:normal;color:var(--accent)}
+  h2{font-size:clamp(1.4rem,2.6vw,2rem);margin:0 0 .5em;letter-spacing:-.01em}
+  h3{font-size:1.06rem;margin:0 0 .35em}
+  .lede{font-size:1.14rem;color:var(--ink-dim);max-width:74ch}
+  .kicker{font-family:var(--mono);font-size:12.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--accent)}
+  .row{display:flex;gap:12px;flex-wrap:wrap;margin-top:26px}
+  .grid{display:grid;gap:16px;margin-top:30px}
+  .g3{grid-template-columns:repeat(auto-fit,minmax(280px,1fr))}
+  .g2{grid-template-columns:repeat(auto-fit,minmax(330px,1fr))}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:20px 20px 22px}
+  .card p{margin:.2em 0 0;color:var(--ink-dim);font-size:14.8px}
+  .card .ic{font-family:var(--mono);color:var(--accent);font-size:13px;letter-spacing:.06em}
+  pre{background:#0e1319;border:1px solid var(--line);border-radius:12px;padding:16px 18px;overflow:auto;font-size:13.6px;line-height:1.6}
+  pre code{background:none;border:0;padding:0;color:#dbe4ee}
+  .c{color:#6f7d8c}.k{color:#8fd6ff}.s{color:#c7e79a}.n{color:#f0b667}
+  .diagram{background:var(--bg-soft);border:1px solid var(--line);border-radius:14px;padding:22px 18px;overflow:auto}
+  .diagram pre{background:none;border:0;padding:0;font-size:13.4px;color:var(--ink-dim)}
+  table{width:100%;border-collapse:collapse;margin-top:22px;font-size:14.6px}
+  th,td{text-align:left;padding:11px 12px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{color:var(--ink-faint);font-weight:600;font-size:12.6px;text-transform:uppercase;letter-spacing:.07em}
+  tbody tr:hover{background:#121821}
+  td.y{color:var(--accent)}td.n{color:var(--ink-faint)}td.p{color:var(--warn)}
+  .callout{border-left:3px solid var(--accent);background:var(--bg-soft);border-radius:0 12px 12px 0;padding:18px 20px;margin-top:26px;color:var(--ink-dim)}
+  .callout strong{color:var(--ink)}
+  .steps{counter-reset:s;margin:26px 0 0;padding:0;list-style:none}
+  .steps li{counter-increment:s;display:grid;grid-template-columns:34px 1fr;gap:14px;padding:12px 0;border-top:1px solid var(--line)}
+  .steps li::before{content:counter(s);font-family:var(--mono);color:var(--accent);border:1px solid var(--line);border-radius:8px;width:30px;height:30px;display:grid;place-items:center;font-size:13px}
+  .steps code{word-break:break-all}
+  ul.ticks{list-style:none;padding:0;margin:14px 0 0}
+  ul.ticks li{padding:7px 0 7px 24px;position:relative;color:var(--ink-dim);font-size:15px}
+  ul.ticks li::before{content:"✓";position:absolute;left:2px;color:var(--accent);font-weight:700}
+  .two{display:grid;grid-template-columns:1.05fr .95fr;gap:28px;align-items:start}
+  @media (max-width:900px){.two{grid-template-columns:1fr}}
+  .meta{color:var(--ink-faint);font-size:13.5px;font-family:var(--mono)}
+  footer{padding:44px 0 60px;color:var(--ink-faint);font-size:14.4px}
+  footer .row{margin-top:12px}
+  .pill{display:inline-block;border:1px solid var(--line);border-radius:999px;padding:.24em .7em;margin:0 6px 6px 0;font-size:12.6px;color:var(--ink-dim);font-family:var(--mono)}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wrap">
+    <nav>
+      <div class="brand"><span class="dot"></span> Handoff&nbsp;Router</div>
+      <div class="links">
+        <a href="#how">How it works</a>
+        <a href="#features">Features</a>
+        <a href="#ops">Operations</a>
+        <a href="#compare">Comparison</a>
+        <a href="#quickstart">Quickstart</a>
+        <a href="https://github.com/your-org/handoff-router">GitHub</a>
+      </div>
+    </nav>
+  </div>
+</header>
+
+<section class="hero">
+  <div class="wrap">
+    <div class="kicker">local inference · gpu supervision</div>
+    <h1>One GPU. Many engines.<br><em>Never a fight for VRAM.</em></h1>
+    <p class="lede">
+      Handoff Router is an OpenAI-compatible facade that supervises llama.cpp, vLLM,
+      SGLang, Strata, NInfer — <strong>any</strong> local model server — as backends of a
+      single endpoint. You name a model in the request; it drains whatever is running,
+      stops its process group, waits until the card is actually free, and starts the
+      engine that owns that model.
+    </p>
+    <div class="row">
+      <a class="btn primary" href="#quickstart">Get running in 4 commands</a>
+      <a class="btn ghost" href="https://github.com/your-org/handoff-router/blob/main/docs/COMPARISON.md">How it differs from llama-swap</a>
+      <a class="btn ghost" href="https://github.com/your-org/handoff-router">Source</a>
+    </div>
+    <p class="meta" style="margin-top:26px">
+      Python · MIT · no GPU needed for the 28-test suite · runs on llama.cpp's own
+      <code>--models-preset</code> router · proven on a single RTX 5090 between a 125B MoE,
+      a 27B NVFP4 stack, and llama.cpp presets
+    </p>
+  </div>
+</section>
+
+<section id="problem">
+  <div class="wrap">
+    <h2>The problem it exists for</h2>
+    <p class="lede">
+      Local LLM tooling has gotten very good at <em>many models, one engine</em>. The hard
+      case is narrower and meaner: <strong>many engines, one GPU</strong>, where each engine
+      wants most of the card and a cold load costs minutes.
+    </p>
+    <div class="grid g3">
+      <div class="card"><div class="ic">01 · overlap</div><h3>Two loads, one card</h3>
+        <p>A 50 GiB reload starting while a 27B unload is still releasing CUDA memory is
+        how you get an OOM kill, a 40-minute page-cache rebuild, and a frozen desktop.</p></div>
+      <div class="card"><div class="ic">02 · ownership</div><h3>Who owns the process?</h3>
+        <p>Engines started by hand, by a job runner, or by a previous router process keep
+        holding the port and the memory. Starting a second copy fights them for both.</p></div>
+      <div class="card"><div class="ic">03 · collateral</div><h3>Work in the middle</h3>
+        <p>A switch that kills a live 6,000-token stream, or evicts the embedder every time
+        you change LLMs, makes a multi-engine box unusable in real workflows.</p></div>
+    </div>
+    <div class="callout">
+      <strong>We are not here to replace the ecosystem.</strong>
+      <a href="https://github.com/mostlygeek/llama-swap">llama-swap</a>,
+      <a href="https://github.com/ollama/ollama">Ollama</a>,
+      <a href="https://github.com/mudler/LocalAI">LocalAI</a> and
+      <a href="https://github.com/gpustack/gpustack">GPUStack</a> solve the general
+      problem better and broader than this project does — they get Anthropic and image and
+      audio endpoints, richer routing rules, hot config UIs, and cluster scheduling.
+      This is the one constraint they leave uncovered, and everything here is MIT so you can
+      take just that part.
+    </div>
+  </div>
+</section>
+
+<section id="how">
+  <div class="wrap">
+    <h2>How it works</h2>
+    <div class="two">
+      <div>
+        <div class="diagram">
+<pre><code>clients (OpenAI SDKs, pi, Open WebUI, scripts)
+        │
+        ▼   one address, one API key
+┌───────────────────────────────┐
+│      Handoff Router :8081     │  switches are serialized on one lock
+│  model id → backend → lease   │  only the <span class="s">"model"</span> field is rewritten
+└───┬─────────┬─────────┬───────┘
+    │         │         │
+    ▼         ▼         ▼
+ llama.cpp  Strata    NInfer        <span class="c">engine per process group</span>
+  :18084    :18087    :18089        <span class="c">loopback only; facade is public</span>
+    ▲
+    └── --models-preset  (llama.cpp's own LRU stays intact)
+
+ sidecars: embedder :18090  <span class="k">resident: true</span>  <span class="c">← survives the switch</span></code></pre>
+        </div>
+      </div>
+      <div>
+        <h3 style="margin-top:0">The handoff, step by step</h3>
+        <ol class="steps">
+          <li><strong>Resolve.</strong> The requested model id names a backend — a llama.cpp
+            preset ID, or a declared selector.</li>
+          <li><strong>Reuse if possible.</strong> Right engine already healthy? No restart,
+            no waiting. Concurrent requests coalesce into one in-progress start.</li>
+          <li><strong>Drain.</strong> Stop admitting new work; let in-flight generations
+            finish (<code>drain_timeout_seconds</code>). A slow client fails the switch — it
+            never cuts the stream.</li>
+          <li><strong>Tear down the process group.</strong> <code>SIGTERM</code> then
+            <code>SIGKILL</code> to the whole group, so orphaned CUDA workers go too.
+            <code>resident</code> sidecars are deliberately left running.</li>
+          <li><strong>Wait for the card.</strong> Process-group exit plus a
+            <code>min_free_vram_mib</code> gate from <code>nvidia-smi</code>. If an external
+            supervisor already started the target and it is healthy, adopt it instead of
+            starting a duplicate.</li>
+          <li><strong>Prove it servable.</strong> <code>/health</code> 200 <em>and</em> the
+            model actually loaded (adapter-specific), then forward. You never get
+            “model is not loaded”.</li>
+        </ol>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="features">
+  <div class="wrap">
+    <h2>Features</h2>
+    <div class="grid g3">
+      <div class="card"><div class="ic">swap</div><h3>Engine-level switching</h3>
+        <p>Any HTTP server with a health endpoint becomes a backend. Adapters for
+        <code>llamacpp</code>, <code>vllm</code>, <code>sglang</code>, <code>strata</code>,
+        <code>ninfer</code>; the unit of management is the engine, not the model.</p></div>
+      <div class="card"><div class="ic">safety</div><h3>VRAM-gated handoff</h3>
+        <p>Free-VRAM threshold, process-group teardown, one switch lock, and a lease
+        reserved before the lock is released — the four things that stop overlapping loads.</p></div>
+      <div class="card"><div class="ic">adoption</div><h3>Adopt, don't duplicate</h3>
+        <p>Healthy leftovers — from a crash, a reboot, a job runner, or your own
+        <code>tmux</code> — are matched by command-line fingerprint and taken over.</p></div>
+      <div class="card"><div class="ic">llama.cpp first</div><h3>Your presets stay yours</h3>
+        <p>Every <code>--models-preset</code> section becomes an addressable model ID
+        automatically. <code>/props</code>, <code>/slots</code>, <code>/models/sse</code> and
+        the llama.cpp web UI keep working — even pointed at non-llama.cpp engines, because
+        props are synthesized.</p></div>
+      <div class="card"><div class="ic">zero diff</div><h3>Adopt in place</h3>
+        <p>A launcher shim over your existing <code>llama-server</code> path means your
+        systemd unit, port, and API key never change. Only the router invocation enters
+        the facade; everything else delegates byte-for-byte.</p></div>
+      <div class="card"><div class="ic">no cold reload</div><h3>Config hot reload</h3>
+        <p>Edit <code>router-backends.yaml</code> while serving. The active model is never
+        restarted; changed launch lines apply on the next switch; a broken file is rejected
+        and the running config stays.</p></div>
+      <div class="card"><div class="ic">reclaim</div><h3>Idle TTL, cheap first</h3>
+        <p><code>idle_ttl_seconds</code> per backend, eviction ordered by
+        <code>evict_cost</code>, negative values pin a model in VRAM. Off by default:
+        keep a three-minute load warm until something else needs the card.</p></div>
+      <div class="card"><div class="ic">coexist</div><h3>Resident sidecars</h3>
+        <p>Embedders, rerankers, and small models marked <code>resident: true</code> survive
+        every big-model switch instead of being evicted each time.</p></div>
+      <div class="card"><div class="ic">windows</div><h3>Freeze the GPU</h3>
+        <p><code>POST /router/freeze</code> blocks model loads while ComfyUI, Blender,
+        training, or a benchmark runs. <code>thaw</code> hands it back. Unloading is never
+        blocked, so a window can still clear the model it is standing on.</p></div>
+      <div class="card"><div class="ic">visibility</div><h3>Activity + logs</h3>
+        <p>An in-memory lifecycle ring with durations, streamed over SSE
+        (<code>/router/activity</code>, <code>/activity/stream</code>) and per-backend log
+        tails at <code>/logs/&lt;backend&gt;</code>.</p></div>
+      <div class="card"><div class="ic">recovery</div><h3>Crash-proof state</h3>
+        <p>pid/pgid/boot-id persisted atomically. On restart: adopt what is healthy,
+        reap what is stale, ignore what belongs to another boot.</p></div>
+      <div class="card"><div class="ic">tested</div><h3>28 tests, no GPU</h3>
+        <p>Real subprocesses and real TCP/SSE against fake backends: the whole switch
+        matrix, coalescing, draining, cancellation mid-start, adoption, recovered process
+        groups, the VRAM gate, reload, idle reclaim, coexistence.</p></div>
+    </div>
+  </div>
+</section>
+
+<section id="ops">
+  <div class="wrap">
+    <h2>Operations, in the API</h2>
+    <div class="two">
+      <div>
+<pre><code><span class="c"># what owns the GPU right now, with idle time and eviction cost</span>
+GET  /router/status
+
+<span class="c"># every id, with load state and which backend owns it</span>
+GET  /v1/models
+
+<span class="c"># warm now (switches engine) / free the card now</span>
+POST /models/load     { "model": "flash-next-256k" }
+POST /models/unload   { "model": "flash-next-256k" }
+
+<span class="c"># a ComfyUI window: no model may load until you're done</span>
+POST /router/freeze   →   POST /router/thaw
+
+<span class="c"># add a checkpoint while traffic is flowing; no restart, no cold load</span>
+POST /router/reload
+
+<span class="c"># audit trail with durations, live</span>
+GET  /router/activity?limit=40
+GET  /activity/stream
+GET  /logs/llamacpp?lines=200</code></pre>
+      </div>
+      <div>
+        <h3 style="margin-top:0">Events you can alert on</h3>
+        <ul class="ticks">
+          <li><code>switch</code> → <code>backend_ready</code> with
+            <code>duration_seconds</code> — your cold-start SLO, measured.</li>
+          <li><code>switch_failed</code> — includes the last observed free VRAM and a log tail.</li>
+          <li><code>idle_unload</code> / <code>idle_unloaded</code> — VRAM you got back.</li>
+          <li><code>coexist</code> — a resident backend deliberately kept warm.</li>
+          <li><code>config_reload</code> / <code>config_reload_failed</code> — who changed what,
+            and whether it was rejected.</li>
+          <li><code>restart_pending</code> in <code>/router/status</code> — a config edit that
+            applies on the next switch.</li>
+        </ul>
+        <p class="meta" style="margin-top:18px">One helper for all of it:
+        <code>scripts/routerctl.py status | models | load | unload | freeze | thaw | reload |
+        activity | logs | watch</code></p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="compare">
+  <div class="wrap">
+    <h2>How it compares</h2>
+    <p class="lede">Verified against upstream docs in October 2026. The honest summary:
+      use those projects for breadth; use this for a single card that must be handed
+      between runtimes which each want all of it.</p>
+    <table>
+      <thead><tr>
+        <th>Capability</th><th>Handoff Router</th><th>llama-swap</th><th>Ollama</th><th>GPUStack</th>
+      </tr></thead>
+      <tbody>
+        <tr><td>unit of management</td><td class="y">engine</td><td>model</td><td>model</td><td>model instance</td></tr>
+        <tr><td>arbitrary engine commands</td><td class="y">yes</td><td class="y">yes</td><td class="p">built-in runtimes</td><td class="y">yes</td></tr>
+        <tr><td>free-VRAM gate before start</td><td class="y">threshold</td><td class="p">cost model</td><td class="y">VRAM-fit scheduler</td><td class="y">scheduler</td></tr>
+        <tr><td>adopt a process it did not start</td><td class="y">yes</td><td class="n">no</td><td class="n">no</td><td class="n">no</td></tr>
+        <tr><td>process-group teardown</td><td class="y">killpg</td><td class="p">per process</td><td>internal</td><td>container/job</td></tr>
+        <tr><td>idle TTL unload</td><td class="y">opt-in</td><td class="y">yes</td><td class="y">keep_alive</td><td class="y">scale-to-zero</td></tr>
+        <tr><td>coexistence rules</td><td class="p"><code>resident</code> + <code>evict_cost</code></td><td class="y">groups / matrix DSL</td><td class="y">automatic</td><td class="y">placement</td></tr>
+        <tr><td>config hot reload</td><td class="y">never disturbs active model</td><td class="y">watch-config</td><td>n/a</td><td class="y">yes</td></tr>
+        <tr><td>keep an existing llama-router unit untouched</td><td class="y">binary shim</td><td class="n">own port</td><td class="n">no</td><td class="n">no</td></tr>
+        <tr><td>Anthropic / image / audio endpoints</td><td class="n">no</td><td class="y">yes</td><td class="p">partial</td><td class="y">yes</td></tr>
+        <tr><td>aliases, per-model keys, macros, hooks</td><td class="p">partial</td><td class="y">rich</td><td class="y">yes</td><td class="y">yes</td></tr>
+        <tr><td>Kubernetes path</td><td class="p">docs</td><td class="y">kubeswap</td><td class="y">yes</td><td class="y">native</td></tr>
+        <tr><td>shape</td><td>Python, 1 process</td><td>Go binary</td><td>Go daemon</td><td>cluster manager</td></tr>
+      </tbody>
+    </table>
+    <div class="callout">
+      <strong>Things we would happily take back upstream.</strong> llama-swap's
+      <code>matrix</code> coexistence solver and <code>evict_costs</code> are strictly more
+      expressive than our <code>resident</code>/<code>evict_cost</code> pair; its streamed
+      logs and web UI are better than ours; Ollama's VRAM-fit scheduling is smarter than our
+      threshold. If you maintain any of them and want the adoption + process-group + VRAM-gate
+      pieces, take them — the code is MIT, and <a href="https://github.com/your-org/handoff-router/blob/main/docs/COMPARISON.md">the comparison doc</a>
+      lists exactly where each idea came from.
+    </div>
+  </div>
+</section>
+
+<section id="quickstart">
+  <div class="wrap">
+    <h2>Quickstart</h2>
+    <ol class="steps">
+      <li><code>pipx install handoff-router</code></li>
+      <li><code>mkdir -p ~/.config/handoff-router</code> then copy
+        <code>config/router-backends.example.yaml</code> there and set each engine's
+        <code>command</code>, <code>upstream</code>, and <code>process_match</code>.</li>
+      <li>Check it without touching the GPU:<br>
+        <code>handoff-router --config ~/.config/handoff-router/router-backends.yaml --print-config</code></li>
+      <li><code>handoff-router --config ~/.config/handoff-router/router-backends.yaml --port 8081 --api-key "$KEY"</code></li>
+      <li>Name a model; the engine follows:<br>
+        <code>curl -s localhost:8081/v1/chat/completions -H "Authorization: Bearer $KEY" -d '{"model":"flash-next-256k","messages":[{"role":"user","content":"hi"}]}'</code></li>
+    </ol>
+    <h3 style="margin-top:34px">…or adopt it onto the llama-router you already run</h3>
+<pre><code><span class="c"># moves llama-server aside, leaves a narrow shim in its place:</span>
+<span class="c"># only the --models-preset + --port 8081 invocation enters the facade,</span>
+<span class="c"># every other llama-server call delegates byte-for-byte to llama-server.real</span>
+HANDOFF_ROUTER_PRESET=$HOME/Models/router-presets.ini \
+  deploy/install-dispatcher.sh
+systemctl restart llama-router          <span class="c"># your existing unit, port, and key</span>
+curl -H "Authorization: Bearer $KEY" localhost:8081/router/status</code></pre>
+    <div class="row">
+      <span class="pill">systemd system + user units</span>
+      <span class="pill">cgroup memory guards</span>
+      <span class="pill">Docker / compose</span>
+      <span class="pill">works with any OpenAI client</span>
+      <span class="pill">llama.cpp web UI compatible</span>
+    </div>
+  </div>
+</section>
+
+<section id="faq">
+  <div class="wrap">
+    <h2>Questions worth asking</h2>
+    <div class="grid g2">
+      <div class="card"><h3>Is this a proxy with extra steps?</h3>
+        <p>It is a supervisor that happens to proxy. The value is in what happens before a
+        request is forwarded: drain, process-group teardown, a VRAM gate, adoption, and
+        model-readiness proof. Streaming stays incremental — only enough buffering to find a
+        newline.</p></div>
+      <div class="card"><h3>Why not just add more models to llama.cpp's router?</h3>
+        <p>Because the other engines are not GGUF servers. We keep llama.cpp's
+        <code>--models-preset</code> router as one backend with its LRU intact, and put the
+        engines that cannot live inside it beside it.</p></div>
+      <div class="card"><h3>Will it unload the model I'm using?</h3>
+        <p>Not unless you ask. Idle reclaim is off by default (<code>idle_ttl_seconds: 0</code>),
+        protected by <code>idle_grace_seconds</code>, never runs while a request is in flight,
+        and can pin a backend with a negative TTL.</p></div>
+      <div class="card"><h3>Multi-GPU?</h3>
+        <p>No. The scope is deliberately one card: the failure mode it prevents is
+        two-big-loads-on-one-GPU. For placement across cards and nodes, GPUStack or a
+        Kubernetes path is the right tool.</p></div>
+      <div class="card"><h3>Is the API key enough?</h3>
+        <p>On that host, yes — treat it as root-equivalent, because
+        <code>POST /router/reload</code> re-reads a config that launches arbitrary commands.
+        Bind the facade to a trusted network or put auth and TLS at a reverse proxy.</p></div>
+      <div class="card"><h3>What is missing?</h3>
+        <p>Anthropic <code>/v1/messages</code>, image/audio endpoints, a first-class metrics
+        exporter, richer coexistence solving, non-Linux process handling, and a web UI of our
+        own (the llama.cpp one works). Contributions welcome — see CONTRIBUTING.md.</p></div>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <strong style="color:var(--ink)">Handoff Router</strong> — MIT, Python, single process.
+    Built on llama.cpp's own multi-model router; ideas borrowed openly from llama-swap,
+    Ollama, and GPUStack.
+    <div class="row">
+      <a class="btn ghost" href="https://github.com/your-org/handoff-router/blob/main/docs/DEPLOY.md">Deploy manual</a>
+      <a class="btn ghost" href="https://github.com/your-org/handoff-router/blob/main/docs/CONFIG.md">Config reference</a>
+      <a class="btn ghost" href="https://github.com/your-org/handoff-router/blob/main/docs/ARCHITECTURE.md">Architecture &amp; invariants</a>
+      <a class="btn ghost" href="https://github.com/your-org/handoff-router">GitHub</a>
+    </div>
+  </div>
+</footer>
+
+</body>
+</html>

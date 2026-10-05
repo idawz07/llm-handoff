@@ -1,0 +1,23 @@
+services:
+  handoff-router:
+    build: .
+    restart: unless-stopped
+    ports: ["8081:8081"]
+    environment:
+      HANDOFF_ROUTER_API_KEY: "${HANDOFF_ROUTER_API_KEY:?set HANDOFF_ROUTER_API_KEY in .env}"
+    volumes:
+      - ./config:/config:ro            # router-backends.yaml + router-presets.ini
+      - ${ENGINES_DIR:-$HOME/.cache/llama.cpp}:/engines:ro
+      - ${MODELS_DIR:-$HOME/models}:/models:ro
+      - handoff-state:/home/app/.local/state/handoff-router
+    # The router must be able to signal its backends' process groups.
+    pids_limit: 4096
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+volumes:
+  handoff-state:

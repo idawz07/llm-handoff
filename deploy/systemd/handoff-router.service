@@ -1,0 +1,33 @@
+# System-wide unit. Replace HANDOFF_USER with the account that owns the model
+# files and GPU access (never root), and adjust the absolute paths.
+#   sudo cp deploy/systemd/handoff-router.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now handoff-router
+# A root-owned unit does not need to change when you adopt Handoff Router over an
+# existing llama.cpp router install - see docs/DEPLOY.md "Option B: shim".
+[Unit]
+Description=Handoff Router (one GPU, many engines)
+Documentation=https://github.com/your-org/handoff-router/tree/main/docs
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=HANDOFF_USER
+Group=HANDOFF_USER
+Environment=HANDOFF_ROUTER_CONFIG=/home/HANDOFF_USER/.config/handoff-router/router-backends.yaml
+# Keep secrets out of the unit file:
+#   /etc/handoff-router/env  ->  HANDOFF_ROUTER_API_KEY=...
+EnvironmentFile=-/etc/handoff-router/env
+ExecStart=/home/HANDOFF_USER/.local/bin/handoff-router \
+  --config /home/HANDOFF_USER/.config/handoff-router/router-backends.yaml \
+  --host 0.0.0.0 --port 8081
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=65536
+# An OOM-killed model child must take the whole supervision tree down so
+# Restart= starts a clean router instead of a parent retrying a dead backend.
+OOMPolicy=kill
+# Memory caps live in a drop-in: see memory-guard.conf.example.
+
+[Install]
+WantedBy=multi-user.target

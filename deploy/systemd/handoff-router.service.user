@@ -1,0 +1,15 @@
+# User-mode unit: systemctl --user enable --now handoff-router
+# (needs `loginctl enable-linger <user>` to survive logout)
+[Unit]
+Description=Handoff Router (user session)
+After=network-online.target
+
+[Service]
+Type=simple
+Environment=HANDOFF_ROUTER_CONFIG=%h/.config/handoff-router/router-backends.yaml
+ExecStart=%h/.local/bin/handoff-router --config %h/.config/handoff-router/router-backends.yaml --host 0.0.0.0 --port 8081
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

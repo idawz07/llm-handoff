@@ -1,0 +1,167 @@
+# Handoff Router - example configuration
+#
+# Copy to ~/.config/handoff-router/router-backends.yaml and edit.
+# Every path supports ~, $ENV_VARS, and paths relative to this file.
+#
+# Mental model:
+#   settings:  global safety envelope for the GPU and for switching
+#   backends:  one entry per inference ENGINE/process the router may own
+#   models:    public selector names -> which backend serves them
+#
+# llama.cpp is special: its native multi-model router (--models-preset) is one
+# backend, and every preset section in that .ini file becomes addressable here
+# automatically. You do not re-declare llama.cpp models.
+
+settings:
+  state_dir: ~/.local/state/handoff-router
+
+  # The reference backend name whose presets are auto-imported. Remove
+  # llama_presets (and the backend) if you do not run llama.cpp at all.
+  llama_backend: llamacpp
+  llama_presets: ./router-presets.ini
+  # Optional cache of llama.cpp model metadata (modalities) from a previous run:
+  # llama_models_snapshot: ./llama-router-models-snapshot.json
+
+  # ---- switching safety -------------------------------------------------
+  # A switch stops admitting requests, waits for in-flight generations to
+  # finish, then stops the old process group. If a generation outlives this
+  # timeout the switch fails loudly instead of killing the response.
+  drain_timeout_seconds: 1800
+  shutdown_drain_timeout_seconds: 30
+  stop_timeout_seconds: 45
+  startup_timeout_seconds: 360
+  health_poll_seconds: 0.5
+
+  # Process-group exit is the primary "GPU is free" signal. This threshold is
+  # the backstop: no new backend starts until nvidia-smi reports this much free.
+  # Size it as (model weights + KV + ~10% headroom) for the largest model you
+  # switch TO. Set 0 to disable on machines without nvidia-smi.
+  min_free_vram_mib: 30000
+  gpu_release_timeout_seconds: 120
+  gpu_poll_seconds: 1
+  nvidia_smi: nvidia-smi
+
+  # ---- idle reclaim (off by default) ------------------------------------
+  # 0 keeps a model resident until something else needs the GPU, which is the
+  # right default when a cold load costs minutes. Per-backend override with
+  # idle_ttl_seconds; a negative value pins a backend permanently.
+  idle_ttl_seconds: 0
+  idle_poll_seconds: 10
+  # Never unload a backend that came up within this window (protects a load
+  # that is still warming from a mis-timed reaper pass).
+  idle_grace_seconds: 60
+
+  # ---- operations -------------------------------------------------------
+  # Re-read this file on change without restarting the process or the model.
+  watch_config: true
+  config_poll_seconds: 2
+  activity_history: 200
+
+  upstream_connect_timeout_seconds: 10
+  upstream_write_timeout_seconds: 300
+
+backends:
+  llamacpp:
+    adapter: llamacpp
+    command:
+      - ~/.cache/llama.cpp/llama-server            # your build, or the .real copy
+      - --models-preset
+      - ./router-presets.ini
+      - --models-max
+      - "1"                                        # keep llama.cpp's own LRU at one model
+      - --host
+      - 127.0.0.1
+      - --port
+      - "18084"
+      - --jinja
+      - --timeout
+      - "3600"
+      - --threads
+      - "16"
+      - --metrics
+      - --slots
+      - --perf
+    upstream: http://127.0.0.1:18084
+    health_endpoint: /health
+    startup_timeout_seconds: 60
+    stop_timeout_seconds: 90
+    # Substring fingerprints of this process's /proc/<pid>/cmdline. They let the
+    # router adopt a healthy leftover process instead of racing it for the port.
+    process_match:
+      - llama-server
+      - --models-preset
+      - ./router-presets.ini                        # literal substring of the argv (~/env are expanded)
+      - --port 18084
+
+  # Example: a second engine serving one big MoE checkpoint.
+  strata:
+    adapter: strata
+    command:
+      - ~/engines/strata/.venv/bin/python
+      - ~/engines/strata/serve/server.py
+      - --engine
+      - strata
+      - --config
+      - ~/engines/strata/model.json
+      - --host
+      - 127.0.0.1
+      - --port
+      - "18087"
+    environment:
+      PYTHONUNBUFFERED: "1"
+    upstream: http://127.0.0.1:18087
+    # A cold multi-tens-of-GB load can take minutes; make this generous or the
+    # router will conclude the start failed and clean it up.
+    startup_timeout_seconds: 360
+    stop_timeout_seconds: 90
+    # Reloading this engine is expensive, so prefer evicting cheaper backends.
+    evict_cost: 30
+    process_match:
+      - ~/engines/strata/serve/server.py
+      - --port 18087
+
+  # Example: always-useful sidecar that COEXISTS with the big model.
+  embedder:
+    adapter: llamacpp
+    command:
+      - ~/.cache/llama.cpp/llama-server
+      - --model
+      - ~/models/Qwen3-Embedding-0.6B-f16.gguf
+      - --host
+      - 127.0.0.1
+      - --port
+      - "18090"
+      - --ctx-size
+      - "8192"
+      - --embeddings
+    upstream: http://127.0.0.1:18090
+    startup_timeout_seconds: 30
+    resident: true            # never evicted by a model switch
+    evict_cost: 1             # first to reclaim under idle_ttl
+    idle_ttl_seconds: 900     # but reclaimable after 15 min of quiet
+    process_match:
+      - llama-server
+      - --embeddings
+      - --port 18090
+
+models:
+  # llama.cpp preset IDs already exist automatically; these entries are for the
+  # other engines, and for giving a public name that differs from the upstream ID.
+  flash-next-256k:
+    backend: strata
+    upstream_model: flash-next-iq3
+    owned_by: strata
+    selector: true
+    input_modalities: [text, image]
+    metadata:
+      context_window: 262144
+      max_tokens: 65536
+      description: big MoE via Strata, INT8 KV, vision
+
+  embeddings:
+    backend: embedder
+    upstream_model: Qwen3-Embedding-0.6B
+    owned_by: llamacpp
+    selector: true
+    metadata:
+      context_window: 8192
