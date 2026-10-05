@@ -53,11 +53,11 @@
   .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:20px 20px 22px}
   .card p{margin:.2em 0 0;color:var(--ink-dim);font-size:14.8px}
   .card .ic{font-family:var(--mono);color:var(--accent);font-size:13px;letter-spacing:.06em}
-  pre{background:#0e1319;border:1px solid var(--line);border-radius:12px;padding:16px 18px;overflow:auto;font-size:13.6px;line-height:1.6}
+  pre{background:#0e1319;border:1px solid var(--line);border-radius:12px;padding:16px 18px;overflow:auto;max-width:100%;font-size:13.4px;line-height:1.6}
   pre code{background:none;border:0;padding:0;color:#dbe4ee}
   .c{color:#6f7d8c}.k{color:#8fd6ff}.s{color:#c7e79a}.n{color:#f0b667}
   .diagram{background:var(--bg-soft);border:1px solid var(--line);border-radius:14px;padding:22px 18px;overflow:auto}
-  .diagram pre{background:none;border:0;padding:0;font-size:13.4px;color:var(--ink-dim)}
+  .diagram pre{background:none;border:0;padding:0;margin:0;font-size:13px;line-height:1.55;color:var(--ink-dim);white-space:pre}
   table{width:100%;border-collapse:collapse;margin-top:22px;font-size:14.6px}
   th,td{text-align:left;padding:11px 12px;border-bottom:1px solid var(--line);vertical-align:top}
   th{color:var(--ink-faint);font-weight:600;font-size:12.6px;text-transform:uppercase;letter-spacing:.07em}
@@ -66,13 +66,16 @@
   .callout{border-left:3px solid var(--accent);background:var(--bg-soft);border-radius:0 12px 12px 0;padding:18px 20px;margin-top:26px;color:var(--ink-dim)}
   .callout strong{color:var(--ink)}
   .steps{counter-reset:s;margin:26px 0 0;padding:0;list-style:none}
-  .steps li{counter-increment:s;display:grid;grid-template-columns:34px 1fr;gap:14px;padding:12px 0;border-top:1px solid var(--line)}
+  .steps li{counter-increment:s;display:grid;grid-template-columns:34px minmax(0,1fr);gap:14px;padding:12px 0;border-top:1px solid var(--line)}
+  .steps li>div{min-width:0}
+  .steps li div code{overflow-wrap:anywhere}
   .steps li::before{content:counter(s);font-family:var(--mono);color:var(--accent);border:1px solid var(--line);border-radius:8px;width:30px;height:30px;display:grid;place-items:center;font-size:13px}
-  .steps code{word-break:break-all}
+  .steps code{overflow-wrap:anywhere}
   ul.ticks{list-style:none;padding:0;margin:14px 0 0}
   ul.ticks li{padding:7px 0 7px 24px;position:relative;color:var(--ink-dim);font-size:15px}
   ul.ticks li::before{content:"✓";position:absolute;left:2px;color:var(--accent);font-weight:700}
-  .two{display:grid;grid-template-columns:1.05fr .95fr;gap:28px;align-items:start}
+  .two{display:grid;grid-template-columns:minmax(0,1.05fr) minmax(0,.95fr);gap:28px;align-items:start}
+  .two>*{min-width:0}
   @media (max-width:900px){.two{grid-template-columns:1fr}}
   .meta{color:var(--ink-faint);font-size:13.5px;font-family:var(--mono)}
   footer{padding:44px 0 60px;color:var(--ink-faint);font-size:14.4px}
@@ -158,47 +161,61 @@
 <section id="how">
   <div class="wrap">
     <h2>How it works</h2>
-    <div class="two">
-      <div>
-        <div class="diagram">
-<pre><code>clients (OpenAI SDKs, pi, Open WebUI, scripts)
+    <p class="lede">One address, one API key, one switch lock. The engines stay on
+      loopback; only the facade is reachable.</p>
+    <div class="diagram">
+<pre><code>clients (OpenAI SDKs · pi · Open WebUI · scripts)
         │
-        ▼   one address, one API key
-┌───────────────────────────────┐
-│      Handoff Router :8081     │  switches are serialized on one lock
-│  model id → backend → lease   │  only the <span class="s">"model"</span> field is rewritten
-└───┬─────────┬─────────┬───────┘
-    │         │         │
-    ▼         ▼         ▼
- llama.cpp  Strata    NInfer        <span class="c">engine per process group</span>
-  :18084    :18087    :18089        <span class="c">loopback only; facade is public</span>
+        ▼   one public address
+┌────────────────────────────────────┐
+│       Handoff Router  :8081        │   switches serialized on one lock
+│   model id → backend → lease       │   only the "model" field is rewritten
+└───┬──────────┬──────────┬──────────┘
+    │          │          │
+    ▼          ▼          ▼
+ llama.cpp   Strata     NInfer        one process group per engine, loopback only
+  :18084     :18087     :18089
     ▲
-    └── --models-preset  (llama.cpp's own LRU stays intact)
+    └── --models-preset (llama.cpp's own LRU stays intact)
 
- sidecars: embedder :18090  <span class="k">resident: true</span>  <span class="c">← survives the switch</span></code></pre>
-        </div>
-      </div>
+ sidecar: embedder :18090  resident: true   ← deliberately survives the switch</code></pre>
+    </div>
+    <div class="two">
       <div>
         <h3 style="margin-top:0">The handoff, step by step</h3>
         <ol class="steps">
-          <li><strong>Resolve.</strong> The requested model id names a backend — a llama.cpp
-            preset ID, or a declared selector.</li>
-          <li><strong>Reuse if possible.</strong> Right engine already healthy? No restart,
-            no waiting. Concurrent requests coalesce into one in-progress start.</li>
-          <li><strong>Drain.</strong> Stop admitting new work; let in-flight generations
+          <li><div><strong>Resolve.</strong> The requested model id names a backend — a llama.cpp
+            preset ID, or a declared selector.</div></li>
+          <li><div><strong>Reuse if possible.</strong> Right engine already healthy? No restart,
+            no wait. Concurrent requests coalesce into one in-progress start.</div></li>
+          <li><div><strong>Drain.</strong> Stop admitting new work; let in-flight generations
             finish (<code>drain_timeout_seconds</code>). A slow client fails the switch — it
-            never cuts the stream.</li>
-          <li><strong>Tear down the process group.</strong> <code>SIGTERM</code> then
-            <code>SIGKILL</code> to the whole group, so orphaned CUDA workers go too.
-            <code>resident</code> sidecars are deliberately left running.</li>
-          <li><strong>Wait for the card.</strong> Process-group exit plus a
+            never cuts the stream.</div></li>
+          <li><div><strong>Tear down the process group.</strong> <code>SIGTERM</code>, then
+            <code>SIGKILL</code>, to the whole group, so orphaned CUDA workers go too.
+            <code>resident</code> sidecars are left running on purpose.</div></li>
+          <li><div><strong>Wait for the card.</strong> Process-group exit plus a
             <code>min_free_vram_mib</code> gate from <code>nvidia-smi</code>. If an external
             supervisor already started the target and it is healthy, adopt it instead of
-            starting a duplicate.</li>
-          <li><strong>Prove it servable.</strong> <code>/health</code> 200 <em>and</em> the
-            model actually loaded (adapter-specific), then forward. You never get
-            “model is not loaded”.</li>
+            starting a duplicate.</div></li>
+          <li><div><strong>Prove it servable.</strong> <code>/health</code> 200 <em>and</em> the
+            model actually loaded (adapter-specific) before the first forwarded byte. You
+            never get “model is not loaded”.</div></li>
         </ol>
+      </div>
+      <div class="card">
+        <div class="ic">invariants</div>
+        <h3>What never happens</h3>
+        <ul class="ticks">
+          <li>Two non-resident backends owning the GPU at once.</li>
+          <li>A switch killing a live generation to make room.</li>
+          <li>A disconnected client leaving a half-started 50 GiB process.</li>
+          <li>A duplicate engine fighting a leftover one for the same port.</li>
+          <li>A config edit costing you a cold load.</li>
+          <li>A public model id leaking the upstream engine's name in a stream.</li>
+        </ul>
+        <p style="margin-top:14px"><a href="https://github.com/your-org/handoff-router/blob/main/docs/ARCHITECTURE.md">
+          Read the ten invariants and the two races that shaped this code →</a></p>
       </div>
     </div>
   </div>
@@ -346,15 +363,15 @@ GET  /logs/llamacpp?lines=200</code></pre>
   <div class="wrap">
     <h2>Quickstart</h2>
     <ol class="steps">
-      <li><code>pipx install handoff-router</code></li>
-      <li><code>mkdir -p ~/.config/handoff-router</code> then copy
+      <li><div><code>pipx install git+https://github.com/your-org/handoff-router.git</code></div></li>
+      <li><div><code>mkdir -p ~/.config/handoff-router</code> then copy
         <code>config/router-backends.example.yaml</code> there and set each engine's
-        <code>command</code>, <code>upstream</code>, and <code>process_match</code>.</li>
-      <li>Check it without touching the GPU:<br>
-        <code>handoff-router --config ~/.config/handoff-router/router-backends.yaml --print-config</code></li>
-      <li><code>handoff-router --config ~/.config/handoff-router/router-backends.yaml --port 8081 --api-key "$KEY"</code></li>
-      <li>Name a model; the engine follows:<br>
-        <code>curl -s localhost:8081/v1/chat/completions -H "Authorization: Bearer $KEY" -d '{"model":"flash-next-256k","messages":[{"role":"user","content":"hi"}]}'</code></li>
+        <code>command</code>, <code>upstream</code>, and <code>process_match</code>.</div></li>
+      <li><div>Check it without touching the GPU:<br>
+        <code>handoff-router --config ~/.config/handoff-router/router-backends.yaml --print-config</code></div></li>
+      <li><div><code>handoff-router --config ~/.config/handoff-router/router-backends.yaml --port 8081 --api-key "$KEY"</code></div></li>
+      <li><div>Name a model; the engine follows:<br>
+        <code>curl -s localhost:8081/v1/chat/completions -H "Authorization: Bearer $KEY" -d '{"model":"flash-next-256k","messages":[{"role":"user","content":"hi"}]}'</code></div></li>
     </ol>
     <h3 style="margin-top:34px">…or adopt it onto the llama-router you already run</h3>
 <pre><code><span class="c"># moves llama-server aside, leaves a narrow shim in its place:</span>
