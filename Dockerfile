@@ -14,7 +14,9 @@ RUN pip install --no-cache-dir .
 
 # nvidia-smi is injected by the NVIDIA container runtime; psutil-style process
 # control requires the container to allow signals to the child process groups.
-ENV HANDOFF_ROUTER_CONFIG=/config/router-backends.yaml
+ENV HOME=/home/app \
+    HANDOFF_ROUTER_CONFIG=/config/router-backends.yaml
+RUN mkdir -p /home/app/.local/state/handoff-router
 EXPOSE 8081
 
 ENTRYPOINT ["handoff-router"]

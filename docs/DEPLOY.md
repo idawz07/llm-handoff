@@ -28,7 +28,7 @@ streams pass through chunk-by-chunk.
 | Requirement | Notes |
 |---|---|
 | Linux (x86_64 / arm64) | uses `/proc`, process groups, `killpg` |
-| Python ≥ 3.10 | 3.11–3.13 are what CI runs |
+| Python ≥ 3.10 | CI exercises 3.10–3.13; uses `asyncio.wait_for` for 3.10 compatibility |
 | fastapi, httpx, psutil, PyYAML, uvicorn | pulled in automatically |
 | One or more inference servers | any HTTP server with a health endpoint; adapters ship for `llamacpp`, `vllm`, `sglang`, `strata`, `ninfer` |
 | `nvidia-smi` (optional) | only for the free-VRAM gate; set `min_free_vram_mib: 0` without it |
@@ -88,9 +88,11 @@ Validate without touching the GPU:
 handoff-router --config ~/.config/handoff-router/router-backends.yaml --print-config
 ```
 
-This resolves every `~`/`$VAR`/relative path and prints the effective backend and
-model table. Errors here (missing preset file, unknown backend reference, empty
-command) are the ones that would otherwise surface at first request.
+This resolves settings paths and explicit `./`/`../` paths in backend commands
+and fingerprints, expands `~`/`$VARS`, and prints the effective model/backend
+table. Bare commands use `PATH`; other argv entries pass through literally.
+Errors here (missing preset file, unknown backend reference, empty command or
+unsafe empty adoption fingerprint) otherwise surface at first request.
 
 ---
 
@@ -105,10 +107,26 @@ handoff-router --config ~/.config/handoff-router/router-backends.yaml \
 
 ### 4.2 System service
 
+From a checkout, install into a system venv, then create the user-owned config.
+The key file **must exist before starting** the unit because it binds to all
+interfaces. The example assumes the service user's home is `/home/handoff`:
+
 ```bash
-sudo useradd -r -m -G video handoff                # or reuse your account
-sudo -u handoff mkdir -p ~/.config/handoff-router
-sudo -u handoff cp config/router-backends.example.yaml ~/.config/handoff-router/router-backends.yaml
+sudo useradd -U -r -m -G video handoff             # or reuse your account
+sudo python3 -m venv /opt/handoff-router
+sudo /opt/handoff-router/bin/pip install .
+sudo install -d -m 750 -o handoff -g handoff /home/handoff/.config/handoff-router
+sudo install -m 640 -o handoff -g handoff config/router-backends.example.yaml \
+  /home/handoff/.config/handoff-router/router-backends.yaml
+sudo install -m 640 -o handoff -g handoff config/router-presets.example.ini \
+  /home/handoff/.config/handoff-router/router-presets.ini
+# Edit engine commands, model paths, process fingerprints and GPU threshold.
+sudo -iu handoff /opt/handoff-router/bin/handoff-router \
+  --config /home/handoff/.config/handoff-router/router-backends.yaml --print-config
+
+sudo install -d -m 750 -o root -g handoff /etc/handoff-router
+sudo sh -c 'printf "HANDOFF_ROUTER_API_KEY=" > /etc/handoff-router/env; openssl rand -hex 32 >> /etc/handoff-router/env'
+sudo chmod 640 /etc/handoff-router/env
 sudo cp deploy/systemd/handoff-router.service /etc/systemd/system/handoff-router.service
 sudo sed -i 's/HANDOFF_USER/handoff/g' /etc/systemd/system/handoff-router.service
 sudo systemctl daemon-reload
@@ -116,19 +134,16 @@ sudo systemctl enable --now handoff-router
 journalctl -u handoff-router -f
 ```
 
-Keep the API key out of the unit file:
-
-```bash
-sudo install -d -m 750 -o root -g handoff /etc/handoff-router
-printf 'HANDOFF_ROUTER_API_KEY=%s\n' "$(openssl rand -hex 32)" | sudo tee /etc/handoff-router/env
-sudo chmod 640 /etc/handoff-router/env
-```
+If the home is elsewhere, edit the absolute paths in the unit and config.
+Never use `sudo -u handoff ... ~/.config`: `~` expands in the *calling shell*,
+not necessarily to the service user's home.
 
 ### 4.3 User service (desktop box, no root)
 
 ```bash
 mkdir -p ~/.config/systemd/user
 cp deploy/systemd/handoff-router.service.user ~/.config/systemd/user/handoff-router.service
+# This unit binds 127.0.0.1 only. Configure a key before exposing it remotely.
 systemctl --user daemon-reload
 systemctl --user enable --now handoff-router
 loginctl enable-linger "$USER"       # keep it running after logout
@@ -136,13 +151,22 @@ loginctl enable-linger "$USER"       # keep it running after logout
 
 ### 4.4 Container
 
+The image contains **only the facade**, not llama.cpp/Strata or their shared
+libraries. Build a derived image with your engines, or mount compatible Linux
+binaries and their libraries. Before starting, edit the YAML and presets so
+commands use container paths (`/engines/llama-server.real`, `/models/...`,
+`/config/router-presets.ini`); the workstation example's `~/.cache/...` paths
+will **not** work in this container. For Compose, set `ENGINES_DIR` and
+`MODELS_DIR` to absolute host paths and supply a real `/config/router-backends.yaml`.
+
 ```bash
 docker build -t handoff-router .
 docker run --rm --gpus all -p 8081:8081 \
   -e HANDOFF_ROUTER_API_KEY="$MY_KEY" \
   -v ~/.config/handoff-router:/config:ro \
-  -v ~/.cache/llama.cpp:/engines:ro \
+  -v /absolute/path/to/container-compatible/engines:/engines:ro \
   -v ~/models:/models:ro \
+  -v handoff-state:/home/app/.local/state/handoff-router \
   handoff-router --config /config/router-backends.yaml
 ```
 
@@ -157,16 +181,25 @@ the container if you want `process_match` fingerprints to stay readable.
 ## 5. Adopting it onto an existing llama.cpp router install (zero client change)
 
 If you already run llama.cpp's multi-model router under a service, you do not
-have to change the unit, the port, or the API key. `install-dispatcher.sh` moves
-the real binary aside and leaves a narrow shim in its place:
+have to change the unit, port, or API key. **Schedule a restart window** and
+back up `build/bin/llama-server` and `build/bin/llama-server.real` first.
+The installer keeps an existing `.real` binary when replacing a legacy
+`LLAMA_MULTI_BACKEND_DISPATCHER`; if a rebuild replaced the shim with a fresh
+binary, it copies that new binary to `.real` and retains the old one as
+`.real.previous.*`. It refuses to install if `.real` is another dispatcher.
+The shim persists the absolute config/preset paths passed at install time,
+because a systemd service never inherits the install command's environment:
 
 ```bash
 HANDOFF_LLAMA_ROOT=~/llama.cpp \
 HANDOFF_ROUTER_PRESET=$HOME/Models/router-presets.ini \
 HANDOFF_ROUTER_CONFIG=$HOME/.config/handoff-router/router-backends.yaml \
+HANDOFF_ROUTER_BIN=$(command -v handoff-router) \
   deploy/install-dispatcher.sh
 
-systemctl restart llama-router          # your existing unit
+# Confirm .real is still the real server, not a dispatcher, before restarting.
+file ~/llama.cpp/build/bin/llama-server.real
+systemctl restart llama-router          # your existing unit, planned window
 ```
 
 Behaviour of the shim:
@@ -178,16 +211,22 @@ Behaviour of the shim:
 - `HANDOFF_ROUTER_BYPASS=1` forces the untouched binary — handy for debugging;
 - `deploy/uninstall-dispatcher.sh` restores the original binary.
 
-Rerun the installer after any llama.cpp rebuild: a rebuild replaces
-`build/bin/llama-server` and removes the shim.
+Rerun the installer **with both config and preset variables again** after any
+llama.cpp rebuild: a rebuild replaces `build/bin/llama-server` and removes the
+shim. Keep the checkout (or a stable copy of `deploy/dispatcher.sh`) at the path
+embedded in the installed shim. `uninstall-dispatcher.sh` atomically restores
+`.real` to `llama-server`; a `.legacy.*` copy is left for manual rollback.
 
 **Migrating from the llama.cpp in-tree `tools/backend-router`:** the package was
 renamed `backend_router` → `handoff_router` and now reads `--config` (the old
-`--backend-registry` flag is still accepted). Point your unit at
-`handoff-router --config <your router-backends.yaml>`, set
-`settings.llama_presets` explicitly, and keep your existing `process_match`
-entries — they are the only part that must stay byte-identical for adoption to
-work.
+`--backend-registry` flag is still accepted). With the shim, keep the old unit
+unchanged; set `settings.llama_presets` explicitly and point the llama.cpp
+backend's `command` at **`build/bin/llama-server.real`**, never at the shim.
+Keep the existing specific `process_match` fingerprints for safe adoption.
+If you served llama.cpp's browser UI, set `HANDOFF_WEB_UI_DIR` to its built UI
+assets **when running the installer** (the shim persists this path), or in the
+service environment. Configure the browser with the API key: `/props` and
+inference are authenticated when a key is present.
 
 ---
 
@@ -265,9 +304,9 @@ Pass criteria:
 | Change | Action |
 |---|---|
 | edit `router-backends.yaml` | nothing — the watcher reloads within `config_poll_seconds`; or `python3 scripts/routerctl.py reload` |
-| changed a **running** backend's `command` | applied automatically on the **next switch** to that backend (never kills a live model) |
-| removed a backend that is running but idle | stopped immediately; if it was active, it is kept until the next switch and reported as `restart_pending` |
-| llama.cpp rebuild (if you use the shim) | rerun `deploy/install-dispatcher.sh`, restart your unit |
+| changed a **running** backend's `command` | staged until the next request to that backend, after its own leases drain |
+| removed a backend that is running but idle | marked `retired`; stopped by the reaper on its next poll. Selected/in-flight processes wait for a safe switch/drain |
+| llama.cpp rebuild (if you use the shim) | rerun the installer **with config and preset paths**, verify `.real`, then restart your unit |
 | `pip install --upgrade handoff-router` | restart the service (drains in-flight generations first) |
 | rollback | `pip install handoff-router==<old>` + restart; the `state.json` format is backward compatible |
 
@@ -288,8 +327,8 @@ discovers listeners and adopts or cleans up by itself.
   the box is not on a trusted network.
 - **The control plane is authenticated**: `/router/status|freeze|thaw|reload`,
   `/router/activity`, `/activity/stream`, `/logs/<backend>`, `/models/load`,
-  `/models/unload`. `POST /router/reload` re-reads a config file that can launch
-  arbitrary commands — treat the API key as root-equivalent on that host.
+  `/models/unload`. `POST /router/reload` re-reads a trusted config file;
+  someone who also controls that file can launch commands as the service user.
 - Run as an unprivileged user in the `video` group, models owned by that user,
   config readable only by it.
 
@@ -301,7 +340,7 @@ discovers listeners and adopts or cleans up by itself.
 |---|---|---|
 | `503 backend_switch_error: GPU memory did not reach N MiB free` | the old backend's memory is still being released, or a foreign process holds the GPU | check `nvidia-smi`, lower `min_free_vram_mib`, or stop the foreign consumer; the error text includes the last observed free VRAM |
 | `backend X port is held by external pid N that is not healthy` | a hand-started engine occupies the port but fails its health check | stop it, or fix `process_match` if it belongs to a *different* service |
-| `refusing to start X; other backends still running: Y` | a non-resident backend survived a stop | check `journalctl` for `BackendStopError`; usually a launcher that re-parents workers — set a larger `stop_timeout_seconds` |
+| `failed to stop backend X` | the process group survived SIGTERM/SIGKILL | check `journalctl` and launcher child-process handling; do not retry a new large backend until the group is gone |
 | model list shows a llama preset you deleted | cached metadata from `llama_models_snapshot` | delete the snapshot file, or keep it — it only feeds modalities for non-selector IDs |
 | a switch hangs, then `timed out waiting for active request(s) to drain` | a client is streaming longer than `drain_timeout_seconds` | raise the timeout, or fix the client that never closes the stream |
 | cold loads take minutes every time | normal for multi-tens-of-GB weights; also check page cache warmth | raise `startup_timeout_seconds`, keep the model resident (`idle_ttl_seconds: 0`), or enable OS-level caching |

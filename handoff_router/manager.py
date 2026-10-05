@@ -15,7 +15,7 @@ import httpx
 
 from .activity import ActivityLog
 from .backends import BackendAdapter, BackendError, BackendStartupError, create_adapter
-from .registry import ModelConfig, ModelRegistry
+from .registry import BackendConfig, ModelConfig, ModelRegistry
 
 LOG = logging.getLogger("handoff-router.manager")
 
@@ -38,7 +38,7 @@ class ModelLease:
         if self.released:
             return
         self.released = True
-        await self.manager.release_request()
+        await self.manager.release_request(self.model.backend)
 
 
 class RouterManager:
@@ -56,6 +56,7 @@ class RouterManager:
         self.active_backend: str | None = None
         self.switching_to: str | None = None
         self.active_request_count = 0
+        self._backend_requests: dict[str, int] = {}
         self.switch_lock = asyncio.Lock()
         self._request_condition = asyncio.Condition()
         self._shutdown = False
@@ -63,11 +64,14 @@ class RouterManager:
         self.state_path = self.settings.state_dir / "state.json"
         self.activity = ActivityLog(self.settings.activity_history)
         self.last_used: dict[str, float] = {}
-        # Backends whose configured command/environment changed, or whose config
-        # entry was removed while still active. They are restarted on the next
-        # switch rather than killed under a live client.
+        self.last_model_by_backend: dict[str, str] = {}
+        # An in-use adapter stays immutable across reload. New launch settings
+        # are staged here until its leases drain on the next request for it.
+        self._pending_configs: dict[str, BackendConfig] = {}
+        self._retired_backends: set[str] = set()
         self._needs_restart: set[str] = set()
         self._supervisor_tasks: list[asyncio.Task] = []
+        self._last_failed_mtime: float | None = None
         self.started_at = time.time()
 
     async def startup(self) -> None:
@@ -120,18 +124,24 @@ class RouterManager:
                     "group cannot be adopted safely"
                 )
 
-        if len(adopted) > 1:
-            LOG.error("multiple configured large backends were already running: %s; stopping all", adopted)
+        nonresident = [name for name in adopted if not self.adapters[name].config.resident]
+        if len(nonresident) > 1:
+            LOG.error("multiple non-resident backends were already running: %s; stopping all", adopted)
             for backend_name in adopted:
                 await self.adapters[backend_name].stop()
             adopted.clear()
             self.active_model = None
             self.active_backend = None
             await self.wait_for_gpu_release()
-        elif len(adopted) == 1 and self.active_backend is None:
-            self.active_backend = adopted[0]
-            self.active_model = self._default_model_for_backend(adopted[0])
+        elif adopted and self.active_backend is None:
+            # A resident sidecar plus one large model is a valid deployment.
+            self.active_backend = nonresident[0] if nonresident else adopted[0]
+            self.active_model = self._default_model_for_backend(self.active_backend)
 
+        for name in adopted:
+            model_id = self.active_model if name == self.active_backend else self._default_model_for_backend(name)
+            if model_id:
+                self.last_model_by_backend[name] = model_id
         self._write_state()
         self._start_supervisors()
         self.activity.record(
@@ -150,7 +160,7 @@ class RouterManager:
         if self._shutdown or self._supervisor_tasks:
             return
         self._supervisor_tasks.append(asyncio.create_task(self._reaper_loop(), name="idle-reaper"))
-        if self.settings.watch_config and self.config_path is not None:
+        if self.config_path is not None:
             self._supervisor_tasks.append(
                 asyncio.create_task(self._config_watch_loop(), name="config-watcher")
             )
@@ -173,74 +183,63 @@ class RouterManager:
 
     async def _reap_once(self) -> None:
         poll = max(1.0, self.settings.idle_poll_seconds)
-        candidates = self._idle_candidates()
-        if not candidates:
+        if not self._idle_candidates() and not self._retired_backends:
             await asyncio.sleep(poll)
             return
         async with self.switch_lock:
-            if self._shutdown or self.frozen or self.switching_to is not None:
+            if self._shutdown or self.switching_to is not None:
                 return
-            # Re-check: a request may have arrived while we waited for the lock.
-            if self.active_request_count > 0:
+            # A config removal must not kill an in-flight stream. Retired
+            # backends stay reachable through their existing leases until idle.
+            for name in list(self._retired_backends):
+                if name == self.active_backend or self._backend_requests.get(name, 0):
+                    continue
+                if name in self.adapters:
+                    await self._stop_backend(name)
+                    self.adapters.pop(name, None)
+                self._retired_backends.discard(name)
+                self.activity.record("backend_retired", backend=name)
+            if self.frozen:
                 return
-            for backend_name, idle_seconds in candidates:
+            # Recompute under the lock: a request may have completed since the
+            # first check, resetting its last-used timestamp.
+            for backend_name, idle_seconds in self._idle_candidates():
                 adapter = self.adapters.get(backend_name)
                 if adapter is None or not adapter.is_running():
                     continue
-                if self.active_request_count > 0:
-                    break
-                LOG.info(
-                    "unloading idle backend %s (idle %.0fs)", backend_name, idle_seconds
-                )
-                # Clear the labels before the teardown: a slow CUDA release must
-                # not leave the facade advertising a backend that is going away.
+                LOG.info("unloading idle backend %s (idle %.0fs)", backend_name, idle_seconds)
                 if self.active_backend == backend_name:
                     self.active_backend = None
                     self.active_model = None
                     self._write_state()
                 self.activity.record(
-                    "idle_unload",
-                    backend=backend_name,
-                    detail=f"idle for {idle_seconds:.0f}s",
-                    level="notice",
+                    "idle_unload", backend=backend_name,
+                    detail=f"idle for {idle_seconds:.0f}s", level="notice",
                 )
                 unload_started = time.time()
                 await self._stop_backend(backend_name)
                 self.activity.record(
-                    "idle_unloaded",
-                    backend=backend_name,
+                    "idle_unloaded", backend=backend_name,
                     duration_seconds=time.time() - unload_started,
                 )
-                self._needs_restart.discard(backend_name)
             self._write_state()
-            if any(not a.is_running() for a in self.adapters.values()):
-                try:
-                    await self.wait_for_gpu_release()
-                except ModelSwitchError as exc:
-                    LOG.info("GPU wait after idle unload: %s", exc)
 
     def _idle_candidates(self) -> list[tuple[str, float]]:
-        """Running backends past their idle TTL, least valuable first."""
-        if self.settings.idle_ttl_seconds <= 0 and not any(
-            (config.idle_ttl_seconds or 0) != 0 for config in self.registry.backends.values()
-        ):
-            return []
+        """Running backends past a positive idle TTL, least valuable first."""
         now = time.time()
-        candidates: list[tuple[float, int, str, float]] = []
+        candidates: list[tuple[int, float, str, float]] = []
         for name, adapter in self.adapters.items():
-            if not adapter.is_running():
+            if not adapter.is_running() or self._backend_requests.get(name, 0):
                 continue
             ttl = adapter.config.idle_ttl_seconds
             if ttl is None:
                 ttl = self.settings.idle_ttl_seconds
-            if ttl is None or ttl < 0:  # negative pins a backend in VRAM
+            if ttl <= 0:  # 0 disables reclaim; a negative value explicitly pins
                 continue
-            if self.active_request_count > 0:
-                return []
             reference = self.last_used.get(name, adapter.runtime.started_at if adapter.runtime else self.started_at)
             idle_seconds = now - reference
             if adapter.runtime and now - adapter.runtime.started_at < self.settings.idle_grace_seconds:
-                continue  # never unload a backend that just came up
+                continue
             if idle_seconds < ttl:
                 continue
             candidates.append((adapter.config.evict_cost, -idle_seconds, name, idle_seconds))
@@ -250,96 +249,105 @@ class RouterManager:
     async def _watch_config_once(self) -> None:
         poll = max(0.5, self.settings.config_poll_seconds)
         await asyncio.sleep(poll)
-        if self.config_path is None or not self.config_path.is_file():
+        if not self.settings.watch_config or self.config_path is None or not self.config_path.is_file():
             return
         try:
             mtime = self.config_path.stat().st_mtime
         except OSError:
             return
-        if mtime <= self.registry.source_mtime:
+        if mtime <= self.registry.source_mtime or mtime == self._last_failed_mtime:
             return
         await self.reload()
 
     async def reload(self) -> dict[str, Any]:
-        """Apply a changed config file without disturbing the active backend.
+        """Validate then atomically stage config edits without stopping a live backend.
 
-        Safe-by-construction rules:
-          - the active backend process is never restarted by a reload;
-          - backends whose command/environment changed are flagged and restart
-            on the next switch (or immediately if they are idle);
-          - a backend removed from the config is stopped right away only when it
-            is not the active one;
-          - a broken new config is rejected and the running one stays.
+        Existing leases retain their original adapter and upstream URL. A changed
+        running backend is replaced only after its own requests have drained on
+        the next request for it. Removals are retired after their leases finish.
         """
         if self.config_path is None:
             raise ModelSwitchError("router was not started from a config file; cannot reload")
         async with self.switch_lock:
             try:
                 fresh = ModelRegistry.from_file(self.config_path)
+                if fresh.settings.state_dir != self.settings.state_dir:
+                    raise ValueError("changing settings.state_dir requires a service restart")
+                if (
+                    fresh.settings.upstream_connect_timeout_seconds != self.settings.upstream_connect_timeout_seconds
+                    or fresh.settings.upstream_write_timeout_seconds != self.settings.upstream_write_timeout_seconds
+                ):
+                    raise ValueError("changing upstream HTTP timeouts requires a service restart")
+                # Preflight every adapter before changing any state. A bad
+                # adapter name must not leave the running registry half-updated.
+                prepared = {name: create_adapter(cfg, fresh.settings) for name, cfg in fresh.backends.items()}
+                for cfg in fresh.backends.values():
+                    _ = cfg.port
             except Exception as exc:
-                self.activity.record(
-                    "config_reload_failed", detail=str(exc), level="error"
-                )
+                try:
+                    self._last_failed_mtime = self.config_path.stat().st_mtime
+                except OSError:
+                    pass
+                self.activity.record("config_reload_failed", detail=str(exc), level="error")
                 raise ModelSwitchError(f"config reload failed: {exc}") from exc
 
             old_names = set(self.adapters)
             new_names = set(fresh.backends)
             changes: dict[str, list[str]] = {"added": [], "removed": [], "changed": [], "unchanged": []}
 
-            for name in sorted(new_names - old_names):
-                self.adapters[name] = create_adapter(fresh.backends[name], fresh.settings)
-                changes["added"].append(name)
+            for name in sorted(new_names):
+                new_config = fresh.backends[name]
+                old = self.adapters.get(name)
+                if old is None:
+                    self.adapters[name] = prepared[name]
+                    changes["added"].append(name)
+                elif old.config == new_config:
+                    old.settings = fresh.settings
+                    changes["unchanged"].append(name)
+                elif old.is_running():
+                    # Do NOT mutate old.config: a lease may read its upstream URL
+                    # after reload releases switch_lock and before it sends.
+                    self._pending_configs[name] = new_config
+                    self._needs_restart.add(name)
+                    old.settings = fresh.settings
+                    changes["changed"].append(name)
+                else:
+                    self.adapters[name] = prepared[name]
+                    changes["changed"].append(name)
+                if not (old and old.is_running() and old.config != new_config):
+                    self._pending_configs.pop(name, None)
+                    self._needs_restart.discard(name)
+                self._retired_backends.discard(name)
 
             for name in sorted(old_names - new_names):
-                adapter = self.adapters[name]
-                if adapter.is_running() and self.active_backend == name:
-                    self._needs_restart.add(name)
-                    LOG.warning(
-                        "backend %s was removed from the config but is active; "
-                        "keeping it until the next switch",
-                        name,
-                    )
-                elif adapter.is_running():
-                    await self._stop_backend(name)
-                    changes["removed"].append(name)
+                old = self.adapters[name]
+                if old.is_running() or self._backend_requests.get(name, 0):
+                    # No process is stopped in a reload, even an unselected
+                    # resident sidecar with an in-flight stream.
+                    self._retired_backends.add(name)
                 else:
                     self.adapters.pop(name, None)
-                    changes["removed"].append(name)
-
-            for name in sorted(new_names & old_names):
-                adapter = self.adapters[name]
-                if adapter.config == fresh.backends[name]:
-                    changes["unchanged"].append(name)
-                    continue
-                adapter.config = fresh.backends[name]
-                changes["changed"].append(name)
-                if adapter.is_running():
-                    self._needs_restart.add(name)
-
-            stopped_for_restart: list[str] = []
-            for name in sorted(self._needs_restart):
-                adapter = self.adapters.get(name)
-                if adapter is None or not adapter.is_running():
-                    self._needs_restart.discard(name)
-                    continue
-                if name == self.active_backend or self.active_request_count > 0:
-                    continue
-                await self._stop_backend(name)
+                    self._retired_backends.discard(name)
+                    if self.active_backend == name:
+                        self.active_backend = None
+                        self.active_model = None
+                    self.last_model_by_backend.pop(name, None)
+                self._pending_configs.pop(name, None)
                 self._needs_restart.discard(name)
-                stopped_for_restart.append(name)
+                changes["removed"].append(name)
 
             self.registry = fresh
             self.settings = fresh.settings
-            self.state_path = self.settings.state_dir / "state.json"
-            if self.active_backend is not None and self.active_model is not None:
-                if self.registry.resolve(self.active_model) is None:
-                    self.active_model = self._default_model_for_backend(self.active_backend)
+            self._last_failed_mtime = None
+            if self.active_model is not None and self.registry.resolve(self.active_model) is None:
+                self.active_model = None
             self._write_state()
 
             summary = {
                 "models": len(self.registry.models),
                 "backends": len(self.adapters),
                 "restart_pending": sorted(self._needs_restart),
+                "retired": sorted(self._retired_backends),
             }
             self.activity.record(
                 "config_reload",
@@ -395,8 +403,11 @@ class RouterManager:
             raise ModelSwitchError("router is shutting down")
 
         async with self.switch_lock:
-            # A request may have passed the first check and then waited behind
-            # shutdown for the lock.
+            # Reload may have changed this model's owning backend while the
+            # request waited. Never route using a pre-lock registry snapshot.
+            model = self.registry.resolve(model_id)
+            if model is None:
+                raise ModelSwitchError(f"model {model_id!r} is not configured")
             if self._shutdown:
                 raise ModelSwitchError("router is shutting down")
             if self.frozen:
@@ -409,7 +420,9 @@ class RouterManager:
                 # cannot observe zero active requests between readiness and proxying.
                 async with self._request_condition:
                     self.active_request_count += 1
+                    self._backend_requests[model.backend] = self._backend_requests.get(model.backend, 0) + 1
                 self.active_model = model_id
+                self.last_model_by_backend[model.backend] = model_id
                 self.last_used[model.backend] = time.time()
                 self._write_state()
                 self.activity.record(
@@ -433,6 +446,27 @@ class RouterManager:
             finally:
                 self.switching_to = None
 
+    async def acquire_existing(self, model_id: str) -> ModelLease:
+        """Lease a running native router for /models/unload; never load a model.
+
+        Unload is permitted during a GPU freeze, but must not start or switch an
+        engine just to unload a model that may not be resident in llama.cpp.
+        """
+        model = self.registry.resolve(model_id)
+        if model is None:
+            raise ModelSwitchError(f"model {model_id!r} is not configured")
+        async with self.switch_lock:
+            model = self.registry.resolve(model_id)
+            if model is None:
+                raise ModelSwitchError(f"model {model_id!r} is not configured")
+            adapter = self.adapters.get(model.backend)
+            if self._shutdown or adapter is None or not adapter.is_running() or not await adapter.is_healthy():
+                raise ModelSwitchError(f"backend {model.backend!r} is not running")
+            async with self._request_condition:
+                self.active_request_count += 1
+                self._backend_requests[model.backend] = self._backend_requests.get(model.backend, 0) + 1
+            return ModelLease(self, model, adapter)
+
     def set_frozen(self, frozen: bool) -> None:
         """Window control: while frozen, acquire() raises ModelSwitchError.
 
@@ -445,10 +479,12 @@ class RouterManager:
         self.activity.record("freeze" if frozen else "thaw", level="notice")
         LOG.info("router freeze state set to %s", frozen)
 
-    async def release_request(self) -> None:
+    async def release_request(self, backend: str) -> None:
         async with self._request_condition:
-            if self.active_request_count > 0:
+            if self._backend_requests.get(backend, 0):
+                self._backend_requests[backend] -= 1
                 self.active_request_count -= 1
+                self.last_used[backend] = time.time()  # TTL starts when the stream finishes
             self._request_condition.notify_all()
         self._write_state()
 
@@ -457,113 +493,116 @@ class RouterManager:
         if model is None:
             raise ModelSwitchError(f"model {model_id!r} is not configured")
         async with self.switch_lock:
-            if self.active_backend != model.backend:
+            model = self.registry.resolve(model_id)
+            if model is None:
+                raise ModelSwitchError(f"model {model_id!r} is not configured")
+            adapter = self.adapters[model.backend]
+            if not adapter.is_running():
                 return False
-            await self._wait_for_drain(self.settings.drain_timeout_seconds)
+            await self._wait_for_drain(self.settings.drain_timeout_seconds, backend=model.backend)
             await self._stop_backend(model.backend)
-            self.active_model = None
-            self.active_backend = None
-            self._needs_restart.discard(model.backend)
+            if self.active_backend == model.backend:
+                self.active_model = None
+                self.active_backend = None
+            self.last_model_by_backend.pop(model.backend, None)
             self._write_state()
             self.activity.record("manual_unload", backend=model.backend, model=model.id, level="notice")
-            await self.wait_for_gpu_release()
+            if not any(other.is_running() for other in self.adapters.values()):
+                await self.wait_for_gpu_release()
             return True
 
+    async def note_model_unloaded(self, model_id: str) -> None:
+        """The native llama.cpp router unloaded one child model, not its server."""
+        async with self.switch_lock:
+            if self.active_model == model_id:
+                self.active_model = None
+                self._write_state()
+            model = self.registry.resolve(model_id)
+            if model and self.last_model_by_backend.get(model.backend) == model_id:
+                self.last_model_by_backend.pop(model.backend, None)
+            self.activity.record("manual_unload", model=model_id, level="notice")
+
     async def _ensure_active_locked(self, model: ModelConfig) -> None:
+        # Removed backends are allowed to finish their streams; retire them on
+        # a later request/reaper pass after their own leases drain, never in reload.
+        for name in sorted(self._retired_backends):
+            if self._backend_requests.get(name, 0):
+                continue  # a compatible target may coexist until this stream ends
+            if name in self.adapters:
+                await self._stop_backend(name)
+                self.adapters.pop(name, None)
+            if self.active_backend == name:
+                self.active_backend = None
+                self.active_model = None
+                self._write_state()
+            self._retired_backends.discard(name)
+            self.activity.record("backend_retired", backend=name)
+
         target = self.adapters[model.backend]
-        same_backend = self.active_backend == model.backend
-        restart_pending = model.backend in self._needs_restart
-        if restart_pending and target.is_running():
-            # A config reload changed this backend's launch line. Honor it on the
-            # next switch instead of leaving a stale process running forever.
-            LOG.info("restarting %s to apply its changed configuration", model.backend)
-            await self._wait_for_drain(self.settings.drain_timeout_seconds)
-            await self._stop_backend(model.backend)
-            self.active_model = None
-            self.active_backend = None
+        if model.backend in self._pending_configs:
+            if target.is_running():
+                await self._wait_for_drain(self.settings.drain_timeout_seconds, backend=model.backend)
+                await self._stop_backend(model.backend)
+                if self.active_backend == model.backend:
+                    self.active_backend = None
+                    self.active_model = None
+                    self._write_state()
+            # Replacing the object also replaces its adapter *class*, not just
+            # its config. Old leases are gone; no caller can read the old URL.
+            self.adapters[model.backend] = create_adapter(self._pending_configs.pop(model.backend), self.settings)
             self._needs_restart.discard(model.backend)
+            target = self.adapters[model.backend]
+        elif target.is_running() and not await target.is_healthy():
+            await self._wait_for_drain(self.settings.drain_timeout_seconds, backend=model.backend)
+            await self._stop_backend(model.backend)
+            if self.active_backend == model.backend:
+                self.active_backend = None
+                self.active_model = None
+                self._write_state()
+
+        if not target.config.resident:
+            # A new large backend evicts *all* other non-residents, regardless
+            # of which one was most recently selected. Resident sidecars stay.
+            victims = sorted(
+                (name for name, adapter in self.adapters.items()
+                 if name != model.backend and adapter.is_running() and not adapter.config.resident),
+                key=lambda name: (self.adapters[name].config.evict_cost, name),
+            )
+            for name in victims:
+                await self._wait_for_drain(self.settings.drain_timeout_seconds, backend=name)
+                await self._stop_backend(name)
+                if self.active_backend == name:
+                    self.active_backend = None
+                    self.active_model = None
+                    self._write_state()
+                self.activity.record("switch", backend=model.backend, model=model.id, detail=f"evicted {name}")
+                if name in self._retired_backends:
+                    self.adapters.pop(name, None)
+                    self._retired_backends.discard(name)
+
+        if target.is_running() and await target.is_healthy():
+            # Reusing an already-running resident sidecar must never evict the
+            # large backend, even if it was most recently selected.
+            try:
+                await target.wait_until_model_loaded(model)
+            except BackendError as exc:
+                if self.active_model == model.id:
+                    self.active_model = None
+                    self._write_state()
+                raise ModelSwitchError(
+                    f"backend {model.backend} failed to load model {model.id}: {exc}",
+                    backend=model.backend, logs=target.tail_log(),
+                ) from exc
+            self.active_backend = model.backend
+            self.active_model = model.id
             self._write_state()
-            same_backend = False
-        if same_backend and target.is_running() and await target.is_healthy():
-            # llama.cpp keeps its own one-model LRU router behind this adapter;
-            # changing llama model IDs does not restart that router process,
-            # but the new model still has to be loaded into that LRU before
-            # the router may declare the switch done.
-            await target.wait_until_model_loaded(model)
             return
 
-        if self.active_backend is not None and self.active_backend != model.backend:
-            previous = self.adapters[self.active_backend]
-            if previous.config.resident:
-                # A resident sidecar (embedder, reranker) coexists by design. Keep
-                # it loaded and simply move the primary pointer; the survivors
-                # check below still forbids a second non-resident backend.
-                LOG.info(
-                    "keeping resident backend %s loaded while switching to %s/%s",
-                    previous.config.name,
-                    model.backend,
-                    model.id,
-                )
-                self.activity.record(
-                    "coexist",
-                    backend=previous.config.name,
-                    model=model.id,
-                    detail="resident backend kept loaded",
-                )
-                self.active_model = None
-                self.active_backend = None
-                self._write_state()
-            else:
-                await self._wait_for_drain(self.settings.drain_timeout_seconds)
-                LOG.info(
-                    "switching model %s/%s -> %s/%s",
-                    self.active_backend,
-                    self.active_model,
-                    model.backend,
-                    model.id,
-                )
-                from_backend = self.active_backend
-                await self._stop_backend(from_backend)
-                self.active_model = None
-                self.active_backend = None
-                self._write_state()
-                self.activity.record(
-                    "switch",
-                    backend=model.backend,
-                    model=model.id,
-                    detail=f"evicted {from_backend}",
-                )
-            outcome = await self._wait_for_target_or_gpu(target)
-            if outcome == "adopted":
-                await self._activate_backend(model)
-                return
-        elif target.is_running():
-            # State was stale but the target adapter still owns a process.
-            if await target.is_healthy():
-                self.active_backend = model.backend
-                return
-            await self._stop_backend(model.backend)
-            outcome = await self._wait_for_target_or_gpu(target)
-            if outcome == "adopted":
-                await self._activate_backend(model)
-                return
+        if any(name != model.backend and adapter.is_running() for name, adapter in self.adapters.items()):
+            self.activity.record("coexist", backend=model.backend, model=model.id,
+                                 detail="keeping compatible running backend(s)")
 
-        # Defensive invariant: no non-resident backend may survive a start.
-        # Resident backends (embedders, rerankers) are deliberately allowed to
-        # coexist; they are chosen for fitting alongside the large model.
-        survivors = [
-            name for name, adapter in self.adapters.items()
-            if name != model.backend and adapter.is_running() and not adapter.config.resident
-        ]
-        if survivors:
-            raise ModelSwitchError(
-                f"refusing to start {model.backend}; other backends still running: {', '.join(survivors)}",
-                backend=model.backend,
-            )
-
-        # Also gate an initial start. This catches a large unconfigured GPU
-        # consumer that listener discovery cannot identify, and adopts an
-        # externally started copy of the target instead of racing it.
+        # GPU gate also covers initial starts and externally started copies.
         try:
             outcome = await self._wait_for_target_or_gpu(target)
         except ModelSwitchError as exc:
@@ -633,19 +672,25 @@ class RouterManager:
         # disconnected client cannot leave a half-started, untracked backend.
         await self._complete_on_cancel(start_and_probe())
 
-    async def _wait_for_drain(self, timeout: float) -> None:
-        if self.active_request_count == 0:
+    async def _wait_for_drain(self, timeout: float, *, backend: str | None = None) -> None:
+        def count() -> int:
+            return self._backend_requests.get(backend, 0) if backend else self.active_request_count
+
+        if count() == 0:
             return
-        LOG.info("waiting for %d active request(s) to drain", self.active_request_count)
+        LOG.info("waiting for %d active request(s) to drain from %s", count(), backend or "all backends")
+
+        async def wait() -> None:
+            async with self._request_condition:
+                await self._request_condition.wait_for(lambda: count() == 0)
+
         try:
-            async with asyncio.timeout(timeout):
-                async with self._request_condition:
-                    await self._request_condition.wait_for(lambda: self.active_request_count == 0)
-        except TimeoutError as exc:
+            await asyncio.wait_for(wait(), timeout=timeout)  # also supports Python 3.10
+        except asyncio.TimeoutError as exc:
             raise ModelSwitchError(
                 f"timed out after {timeout:.1f}s waiting for "
-                f"{self.active_request_count} active request(s) to drain",
-                backend=self.active_backend,
+                f"{count()} active request(s) to drain from {backend or 'all backends'}",
+                backend=backend,
             ) from exc
 
     async def _query_free_vram_mib(self) -> int | None:
@@ -777,7 +822,16 @@ class RouterManager:
         self.active_backend = model.backend
         self.active_model = model.id
         self._write_state()
-        await self.adapters[model.backend].wait_until_model_loaded(model)
+        try:
+            await self.adapters[model.backend].wait_until_model_loaded(model)
+        except BackendError as exc:
+            if self.active_backend == model.backend and self.active_model == model.id:
+                self.active_model = None
+                self._write_state()
+            raise ModelSwitchError(
+                f"backend {model.backend} failed to load model {model.id}: {exc}",
+                backend=model.backend, logs=self.adapters[model.backend].tail_log(),
+            ) from exc
 
     async def _probe_upstream_health(self, target: BackendAdapter) -> bool:
         """Probe the upstream health endpoint without requiring an adopted runtime."""
@@ -800,6 +854,8 @@ class RouterManager:
             described["resident"] = adapter.config.resident
             described["evict_cost"] = adapter.config.evict_cost
             described["restart_pending"] = name in self._needs_restart
+            described["retired"] = name in self._retired_backends
+            described["active_requests"] = self._backend_requests.get(name, 0)
             ttl = adapter.config.idle_ttl_seconds
             described["idle_ttl_seconds"] = ttl if ttl is not None else self.settings.idle_ttl_seconds
             reference = self.last_used.get(name)
@@ -846,6 +902,7 @@ class RouterManager:
                 logs=adapter.tail_log(),
             ) from exc
         self.last_used[backend] = time.time()
+        self.last_model_by_backend.pop(backend, None)
 
     @staticmethod
     async def _complete_on_cancel(awaitable: Any) -> Any:

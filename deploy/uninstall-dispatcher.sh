@@ -11,6 +11,9 @@ if ! grep -aq 'HANDOFF_ROUTER_DISPATCHER' "$TARGET" 2>/dev/null; then
   exit 1
 fi
 [[ -x "$REAL" ]] || { echo "real llama.cpp binary is missing: $REAL" >&2; exit 1; }
-rm -f "$TARGET"
-mv "$REAL" "$TARGET"
+if grep -aEq 'LLAMA_MULTI_BACKEND_DISPATCHER|HANDOFF_ROUTER_DISPATCHER' "$REAL"; then
+  echo "refusing to restore a dispatcher as the real server: $REAL (check .real.previous.* backups)" >&2
+  exit 1
+fi
+mv -f -- "$REAL" "$TARGET"
 printf 'Restored %s\n' "$TARGET"

@@ -211,7 +211,7 @@ async def test_changed_launch_line_is_applied_on_the_next_switch(harness: Harnes
     assert harness.config.starts("vllm") == 1
 
     assert (await harness.chat("big-vllm")).status_code == 200
-    assert harness.config.starts("vllm") == 2, "changed backend must restart on the next switch"
+    assert harness.config.starts("vllm") == 2, "changed backend must restart on its next request"
 
 
 @pytest.mark.asyncio

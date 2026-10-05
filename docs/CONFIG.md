@@ -1,8 +1,10 @@
 # Configuration reference
 
-One file, three sections. Paths accept `~`, `$VARS`, and are resolved relative to
-the config file itself. `handoff-router --config <file> --print-config` shows the
-resolved result without starting anything.
+One file, three sections. Settings paths are resolved relative to this file;
+backend `command`/`process_match` entries beginning `./` or `../` are also
+config-relative. `~` and `$VARS` expand everywhere. Bare executable names use
+`PATH`, and other arguments pass through literally. `handoff-router --config
+<file> --print-config` shows the result without starting anything.
 
 ```yaml
 settings:  { ... }   # global envelope
@@ -31,7 +33,7 @@ models:    { ... }   # public selector names -> backend
 | `nvidia_smi` | `nvidia-smi` | path to the query tool |
 | `upstream_connect_timeout_seconds` | `10` | proxy connect timeout |
 | `upstream_write_timeout_seconds` | `300` | proxy request-body write timeout |
-| `idle_ttl_seconds` | `0` | idle reclaim. `0` = never unload. Per-backend override available; negative pins a backend |
+| `idle_ttl_seconds` | `0` | idle reclaim. `0` = off. A negative value opts out of idle reclaim (not manual unload or model switches) |
 | `idle_poll_seconds` | `5` | reaper interval (floored at 1s) |
 | `idle_grace_seconds` | `30` | never unload a backend younger than this |
 | `watch_config` | `true` | reload `router-backends.yaml` when its mtime changes |
@@ -49,16 +51,18 @@ models:    { ... }   # public selector names -> backend
 | `adapter` | backend name | one of `llamacpp`, `vllm`, `sglang`, `strata`, `ninfer` (model-loading semantics per engine) |
 | `health_endpoint` | `/health` | readiness probe used after start and before reuse |
 | `environment` | `{}` | extra env vars for the child process |
-| `process_match` | `[]` | literal substrings that must **all** appear in `/proc/<pid>/cmdline` before a process may be adopted. Make them unique |
+| `process_match` | *required if adoption enabled* | nonempty literal substrings that must **all** appear in `/proc/<pid>/cmdline` before adoption. Make them unique |
 | `startup_timeout_seconds` | settings | per-engine override (cold MoE loads need minutes) |
 | `stop_timeout_seconds` | settings | per-engine override |
-| `adopt_existing` | `true` | allow adopting an already-running copy instead of starting a duplicate |
+| `adopt_existing` | `true` | allow adopting an already-running copy instead of starting a duplicate; set `false` if no safe `process_match` is available |
 | `resident` | `false` | never evicted by a model switch — for small co-resident sidecars |
 | `evict_cost` | `1` | relative pain of reloading. Idle reclaim stops cheap backends first |
-| `idle_ttl_seconds` | settings | per-backend idle TTL; negative pins it in VRAM |
+| `idle_ttl_seconds` | settings | per-backend idle TTL; zero disables idle reclaim for that backend, negative opts out explicitly |
 
-**Adoption is the safety feature here.** With correct `process_match` entries the
-router can (a) reuse a healthy engine left by a previous router process, (b) adopt
+**Adoption is the safety feature here.** An empty fingerprint is rejected when
+adoption is enabled; the process must also have the router's UID and lead its
+own process group. With correct `process_match` entries the router can (a) reuse
+a healthy engine left by a previous router process, (b) adopt
 an engine that an external supervisor started while a switch was draining, and
 (c) refuse to start a duplicate that would fight for the same port and GPU.
 

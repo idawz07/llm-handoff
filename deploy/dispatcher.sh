@@ -26,11 +26,6 @@ if [[ "${HANDOFF_ROUTER_BYPASS:-0}" == "1" || "${LLAMA_BACKEND_ROUTER_BYPASS:-0}
   exec "$REAL" "$@"
 fi
 
-if [[ ! -f "$CONFIG" ]]; then
-  # No config of ours: this machine is not set up for the facade.
-  exec "$REAL" "$@"
-fi
-
 preset=""
 port=""
 args=("$@")
@@ -46,6 +41,7 @@ for ((i = 0; i < ${#args[@]}; i++)); do
 done
 
 if [[ "$preset" == "$PRESET" && "${port:-$PORT}" == "$PORT" ]]; then
+  [[ -f "$CONFIG" ]] || { echo "handoff-router dispatcher: config missing: $CONFIG" >&2; exit 78; }
   if [[ -n "$RUNNER" ]]; then
     exec "$RUNNER" --config "$CONFIG" --host "$HOST" --port "$PORT" "$@"
   fi

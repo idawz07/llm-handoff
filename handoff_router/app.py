@@ -36,12 +36,10 @@ HOP_BY_HOP_HEADERS = {
 }
 PUBLIC_PATHS = {
     "/health", "/v1/health", "/models", "/v1/models",
-    # Web UI endpoints (the UI itself doesn't know the API key)
-    "/", "/slots", "/props", "/completion", "/chat", "/tokenize",
-    "/detokenize", "/save_session", "/load_session",
-    # NOTE: /models/load and /models/unload are authenticated by default. A
-    # keyless caller could otherwise evict a 50 GiB model from a shared LAN.
-    # create_app(keyless_model_api=True) restores llama.cpp's keyless behavior.
+    # Inference, /props?model= (which can cold-load a backend), and every
+    # control endpoint require a key when one is configured. Static UI assets
+    # are exempted separately by resolve_web_ui_asset().
+    # keyless_model_api=True additionally exempts only /models/load|unload.
 }
 
 # Paths that the router proxies to the active backend. Kept in sync with the
@@ -179,17 +177,14 @@ def create_app(
     app.state.registry = registry
     app.state.manager = router_manager
     app.state.client = None
-    public_paths = set(PUBLIC_PATHS)
-    if keyless_model_api:
-        # llama.cpp's own router lets its web UI load/unload without a key.
-        public_paths |= {"/models/load", "/models/unload"}
-
     @app.middleware("http")
     async def preserve_api_key(request: Request, call_next):
         if (
             accepted_keys
             and request.method != "OPTIONS"
-            and request.url.path not in public_paths
+            and not (request.method in ("GET", "HEAD") and request.url.path in PUBLIC_PATHS)
+            and not (keyless_model_api and request.method == "POST"
+                     and request.url.path in {"/models/load", "/models/unload"})
             # The SPA shell at "/" is public, but its hashed JS/CSS/image assets
             # are separate paths; serving them unauthenticated is what lets the
             # chat UI boot at all (the key lives in localStorage, and the UI
@@ -292,8 +287,16 @@ def create_app(
         model = router_manager.registry.resolve(model_id) if isinstance(model_id, str) else None
         if model is None:
             return openai_error(f"model {model_id!r} not found", 404, "invalid_request_error")
-        if router_manager.registry.backends[model.backend].adapter == "llamacpp" and router_manager.active_backend == model.backend:
-            return await _proxy_request(request, router_manager.registry, router_manager, body_override=body)
+        if router_manager.adapters[model.backend].config.adapter == "llamacpp":
+            if not router_manager.adapters[model.backend].is_running():
+                return JSONResponse({"success": True, "stopped": False})
+            response = await _proxy_request(
+                request, router_manager.registry, router_manager,
+                body_override=body, allow_frozen_unload=True,
+            )
+            if 200 <= response.status_code < 300:
+                await router_manager.note_model_unloaded(model.id)
+            return response
         try:
             stopped = await router_manager.deactivate(model_id)
         except ModelSwitchError as exc:
@@ -342,9 +345,8 @@ def create_app(
     async def reload_router_config() -> JSONResponse:
         """Apply router-backends.yaml without restarting the process or the model.
 
-        The active backend is never disturbed: launch lines that changed are
-        applied on the next switch, and backends removed from the config stop
-        immediately only when they are idle.
+        Reload never stops a live process. Changed adapters apply on their next
+        request after leases drain; removed backends are retired when safe.
         """
         try:
             result = await router_manager.reload()
@@ -402,28 +404,40 @@ def create_app(
 
 async def _model_listing(registry: ModelRegistry, manager: RouterManager) -> list[dict[str, Any]]:
     active_spec = registry.resolve(manager.active_model) if manager.active_model else None
-    active_adapter = manager.adapters.get(manager.active_backend) if manager.active_backend else None
-    backend_healthy = bool(active_adapter and await active_adapter.is_healthy())
-
-    upstream_by_id: dict[str, dict[str, Any]] = {}
-    if active_adapter and backend_healthy:
-        for item in await active_adapter.fetch_models():
-            if item.get("id"):
-                upstream_by_id[str(item["id"])] = item
+    # A watcher may swap the registry/adapters while fetch_models() awaits I/O.
+    # A snapshot prevents dictionary-size errors and stale-name KeyErrors.
+    adapters = dict(manager.adapters)
+    upstream_by_backend: dict[str, dict[str, dict[str, Any]]] = {}
+    healthy: set[str] = set()
+    for name, adapter in adapters.items():
+        if not adapter.is_running() or (name != manager.active_backend and not adapter.config.resident):
+            continue
+        if await adapter.is_healthy():
+            healthy.add(name)
+            upstream_by_backend[name] = {
+                str(item["id"]): item
+                for item in await adapter.fetch_models() if item.get("id")
+            }
 
     entries: list[dict[str, Any]] = []
     created = int(time.time())
     for model in registry.models.values():
+        source = upstream_by_backend.get(model.backend, {}).get(model.upstream_model)
+        resident_id = manager.last_model_by_backend.get(model.backend)
+        resident_model = registry.resolve(resident_id) if resident_id else None
         active = bool(
-            backend_healthy
-            and active_spec
-            and active_spec.backend == model.backend
+            model.backend in healthy
             and (
-                manager.active_model == model.id
-                or active_spec.upstream_model == model.upstream_model
+                (model.backend == manager.active_backend and active_spec is not None
+                 and active_spec.backend == model.backend
+                 and (manager.active_model == model.id or active_spec.upstream_model == model.upstream_model))
+                or (model.backend != manager.active_backend
+                    and model.backend in adapters and adapters[model.backend].config.resident
+                    and resident_model is not None
+                    and (model.id == resident_model.id or model.upstream_model == resident_model.upstream_model)
+                    and (source is None or (source.get("status") or {}).get("value", "loaded") == "loaded"))
             )
         )
-        source = upstream_by_id.get(model.upstream_model)
         if source and not model.selector:
             entry = dict(source)
             entry["id"] = model.id
@@ -478,12 +492,20 @@ def _is_model_active(registry: ModelRegistry, manager: RouterManager, model_id: 
     """Whether a public model ID resolves to the currently running model."""
     model = registry.resolve(model_id)
     active = registry.resolve(manager.active_model) if manager.active_model else None
-    if model is None or active is None or manager.active_backend != model.backend:
+    if model is None:
         return False
     adapter = manager.adapters.get(model.backend)
+    if adapter is None or not adapter.is_running():
+        return False
+    if adapter.config.resident and model.backend != manager.active_backend:
+        # The last selected model of a resident process remains loaded when a
+        # different backend takes the primary pointer; other selectors do not.
+        resident_id = manager.last_model_by_backend.get(model.backend)
+        resident_model = registry.resolve(resident_id) if resident_id else None
+        return bool(resident_model and (resident_model.id == model.id
+                    or resident_model.upstream_model == model.upstream_model))
     return bool(
-        adapter
-        and adapter.is_running()
+        active and manager.active_backend == model.backend
         and (manager.active_model == model.id or active.upstream_model == model.upstream_model)
     )
 
@@ -592,6 +614,7 @@ async def _proxy_request(
     manager: RouterManager,
     *,
     body_override: dict[str, Any] | None = None,
+    allow_frozen_unload: bool = False,
 ) -> Response:
     raw_body = await request.body()
     body: dict[str, Any] | None = body_override
@@ -615,10 +638,14 @@ async def _proxy_request(
         return openai_error(f"model {model_id!r} not found", 400, "invalid_request_error")
 
     try:
-        lease = await manager.acquire(model_id)
+        lease = (await manager.acquire_existing(model_id) if allow_frozen_unload
+                 else await manager.acquire(model_id))
     except ModelSwitchError as exc:
         return _switch_error(exc)
 
+    # Reload may have changed the model mapping while acquire() waited for the
+    # switch lock. Use the leased model, not the registry snapshot from above.
+    model = lease.model
     adapter = lease.adapter
     translated_body = adapter.translate_request(body, model) if body is not None else None
     if translated_body is not None:

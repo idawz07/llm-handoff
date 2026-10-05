@@ -1,7 +1,8 @@
 # Handoff Router - example configuration
 #
 # Copy to ~/.config/handoff-router/router-backends.yaml and edit.
-# Every path supports ~, $ENV_VARS, and paths relative to this file.
+# Settings paths are config-relative; command/fingerprint paths beginning ./ or
+# ../ are also config-relative. ~ and $ENV_VARS expand everywhere.
 #
 # Mental model:
 #   settings:  global safety envelope for the GPU and for switching
@@ -44,7 +45,7 @@ settings:
   # ---- idle reclaim (off by default) ------------------------------------
   # 0 keeps a model resident until something else needs the GPU, which is the
   # right default when a cold load costs minutes. Per-backend override with
-  # idle_ttl_seconds; a negative value pins a backend permanently.
+  # idle_ttl_seconds; a negative value opts out of idle reclaim (not switching).
   idle_ttl_seconds: 0
   idle_poll_seconds: 10
   # Never unload a backend that came up within this window (protects a load
@@ -90,7 +91,7 @@ backends:
     process_match:
       - llama-server
       - --models-preset
-      - ./router-presets.ini                        # literal substring of the argv (~/env are expanded)
+      - ./router-presets.ini                        # resolves to an absolute path in command and fingerprint
       - --port 18084
 
   # Example: a second engine serving one big MoE checkpoint.

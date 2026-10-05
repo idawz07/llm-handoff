@@ -21,14 +21,14 @@ handoff_router/
 These are the properties the code is organized around. A change that breaks one
 of them is a bug, even if every test passes.
 
-1. **One non-resident backend at a time.** `_ensure_active_locked()` refuses to
-   start a backend while another non-resident one is running.
+1. **One non-resident backend at a time.** `_ensure_active_locked()` drains and
+   stops the old non-resident before starting another; resident sidecars coexist.
 2. **A switch never kills a live generation.** Drain happens before teardown,
    bounded by `drain_timeout_seconds`; a timeout fails the switch, it does not
    cut the stream.
 3. **The lease is reserved while holding the switch lock.** `acquire()` increments
-   the active-request count before releasing `switch_lock`, so a competing switch
-   can never observe "zero requests" in the window between readiness and proxying.
+   the per-backend and total request counts before releasing `switch_lock`, so a
+   competing switch cannot observe "zero requests" before proxying.
    (This was a real race in an earlier revision.)
 4. **Client disconnection cannot leak state.** Leases are released through
    `asyncio.shield`, and start/cleanup runs inside `_complete_on_cancel`, so a
@@ -39,7 +39,8 @@ of them is a bug, even if every test passes.
 6. **Adoption over duplication.** A healthy process matching `process_match` on
    the target port is adopted instead of starting a second copy for the same port
    and the same GPU. Adoption requires the pid to be its own process-group leader,
-   so a group signal can never hit an unrelated shell.
+   with the router's UID and a nonempty command-line fingerprint, so a group
+   signal cannot hit an unrelated shell or an arbitrary listener on the port.
 7. **Free the GPU before starting the next engine.** Process-group exit is the
    primary signal; `min_free_vram_mib` from `nvidia-smi` is the backstop for a
    consumer the router cannot identify.
@@ -50,8 +51,9 @@ of them is a bug, even if every test passes.
    `{active_backend, active_model, pid, pgid, boot_id, command}` atomically. On
    restart, a matching healthy group is adopted; a stale group from the same boot
    is terminated; anything from another boot is ignored.
-10. **Reload never disturbs the active model.** Changed launch lines apply on the
-    next switch; a removed-but-active backend survives until then.
+10. **Reload never disturbs an existing lease.** Running adapters/URLs remain
+    immutable until their own leases drain; changed config applies on the next
+    request to that backend. Removed backends are retired only when safe.
 
 ---
 

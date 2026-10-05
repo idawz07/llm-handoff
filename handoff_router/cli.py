@@ -9,15 +9,18 @@ The facade is usually reached through a launcher shim (see
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
 import logging
 import os
 from pathlib import Path
 
 import uvicorn
+import yaml
 
 from . import __version__
 from .app import create_app
+from .backends import create_adapter
 from .registry import ModelRegistry
 
 CONFIG_ENV = "HANDOFF_ROUTER_CONFIG"
@@ -43,9 +46,13 @@ def parser() -> argparse.ArgumentParser:
         default=None,
         help="router-backends.yaml (default: $%s or %s)" % (CONFIG_ENV, DEFAULT_CONFIG_PATHS[0]),
     )
-    result.add_argument("--host", default="0.0.0.0")
+    result.add_argument("--host", default="127.0.0.1")
     result.add_argument("--port", type=int, default=8081)
     result.add_argument("--api-key", action="append", default=[])
+    result.add_argument(
+        "--allow-unauthenticated-remote", action="store_true",
+        help="explicitly permit a non-loopback bind without an API key (unsafe on shared networks)",
+    )
     api_key_file = os.environ.get("HANDOFF_ROUTER_API_KEY_FILE") or os.environ.get("LLAMA_ARG_API_KEY_FILE")
     result.add_argument("--api-key-file", action="append", default=[api_key_file] if api_key_file else [])
     result.add_argument(
@@ -134,7 +141,10 @@ def main() -> None:
     config_path = resolve_config_path(args.config)
     try:
         registry = ModelRegistry.from_file(config_path)
-    except (OSError, ValueError) as exc:
+        for config in registry.backends.values():
+            create_adapter(config, registry.settings)  # validate type without starting a process
+            _ = config.port  # validate the upstream URL before accepting --print-config
+    except (OSError, ValueError, yaml.YAMLError) as exc:
         # A bad config should read like a config error, not a stack trace.
         raise SystemExit(f"handoff-router: {config_path}: {exc}") from exc
 
@@ -174,9 +184,20 @@ def main() -> None:
         )
         return
 
+    keys = load_api_keys(args.api_key, args.api_key_file)
+    try:
+        is_loopback = args.host == "localhost" or ipaddress.ip_address(args.host).is_loopback
+    except ValueError:
+        is_loopback = False
+    if not keys and not is_loopback and not args.allow_unauthenticated_remote:
+        raise SystemExit(
+            "handoff-router: refusing non-loopback bind without an API key; "
+            "set --api-key/--api-key-file or explicitly pass --allow-unauthenticated-remote"
+        )
+
     app = create_app(
         registry,
-        api_keys=load_api_keys(args.api_key, args.api_key_file),
+        api_keys=keys,
         cors_origins=args.cors_origins,
         cors_methods=args.cors_methods,
         cors_headers=args.cors_headers,

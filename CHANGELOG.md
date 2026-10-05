@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.2.1 — safety and deployment audit
+
+- Require configured keys for legacy inference routes and `/props`, including
+  method/query variants of otherwise-public paths. Default to a loopback bind;
+  require a key to expose a remote listener unless explicitly overridden.
+- Preserve legacy shim installations and their real binary; persist install-time
+  config/preset paths in the new shim, and fail closed if its config disappears.
+- Track leases per backend; protect in-flight resident streams during removal,
+  preserve coexistence in both switch directions and across router restarts.
+- Stage running adapter changes immutably until their own leases drain; reload
+  can change adapter type without redirecting an old request to a new port.
+- Correct idle TTL `0` semantics; start the idle clock on request completion.
+- Require a nonempty adoption fingerprint and the same UID. Resolve explicit
+  `./`/`../` argv paths relative to the YAML file.
+- Restore Python 3.10 compatibility; repair mobile comparison-table overflow,
+  first-run systemd instructions and container path guidance.
+- Add fake-backend and installer regressions for these cases.
+
 ## 0.2.0 — standalone release
 
 Packaged for general use; extracted from a production single-RTX-5090 setup
@@ -19,8 +37,8 @@ Packaged for general use; extracted from a production single-RTX-5090 setup
 - **Log access** — `GET /logs/<backend>?lines=N`.
 - **Optional llama.cpp** — a config with no `llama_presets` / no llama backend now
   loads, so pure vLLM/Strata/NInfer deployments work.
-- **Portability** — no hardcoded developer paths; `~`/`$VAR`/relative path
-  resolution everywhere; `--config` with `$HANDOFF_ROUTER_CONFIG` and XDG default;
+- **Portability** — no hardcoded developer paths; `~`/`$VAR` and settings-path
+  resolution; `--config` with `$HANDOFF_ROUTER_CONFIG` and XDG default;
   `--print-config`; `handoff-router` console script; `pyproject.toml`; CI.
 - **Auth default** — `/models/load` and `/models/unload` now require an API key
   (`--keyless-model-api` restores llama.cpp's keyless web-UI behaviour).

@@ -7,8 +7,8 @@ services:
       HANDOFF_ROUTER_API_KEY: "${HANDOFF_ROUTER_API_KEY:?set HANDOFF_ROUTER_API_KEY in .env}"
     volumes:
       - ./config:/config:ro            # router-backends.yaml + router-presets.ini
-      - ${ENGINES_DIR:-$HOME/.cache/llama.cpp}:/engines:ro
-      - ${MODELS_DIR:-$HOME/models}:/models:ro
+      - ${ENGINES_DIR:?set ENGINES_DIR to an absolute host path}:/engines:ro
+      - ${MODELS_DIR:?set MODELS_DIR to an absolute host path}:/models:ro
       - handoff-state:/home/app/.local/state/handoff-router
     # The router must be able to signal its backends' process groups.
     pids_limit: 4096

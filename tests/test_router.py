@@ -546,10 +546,20 @@ def test_dispatcher_install_is_idempotent_and_non_router_calls_delegate(tmp_path
     binary.parent.mkdir(parents=True)
     binary.write_text("#!/bin/sh\nprintf 'real:%s\\n' \"$*\"\n")
     binary.chmod(0o755)
+    config = tmp_path / "router-backends.yaml"
+    config.write_text("settings: {}\n")
+    preset = tmp_path / "router-presets.ini"
+    preset.write_text("[*]\n")
+    runner = tmp_path / "handoff-runner"
+    runner.write_text("#!/bin/sh\nprintf 'facade:%s\\n' \"$*\"\n")
+    runner.chmod(0o755)
     environment = {
         **os.environ,
         "LLAMA_SERVER_ROOT": str(root),
         "HANDOFF_DISPATCHER": str(ROOT / "deploy" / "dispatcher.sh"),
+        "HANDOFF_ROUTER_CONFIG": str(config),
+        "HANDOFF_ROUTER_PRESET": str(preset),
+        "HANDOFF_ROUTER_RUNNER": str(runner),
     }
     install = ROOT / "deploy" / "install-dispatcher.sh"
     uninstall = ROOT / "deploy" / "uninstall-dispatcher.sh"

@@ -8,12 +8,13 @@ load or a frozen workstation. Tests and invariants matter more than volume.
 ```bash
 git clone https://github.com/your-org/handoff-router && cd handoff-router
 pip install -e ".[dev]"
-pytest -q            # 28 tests, fake backends, no GPU, ~14s
+pytest -q            # fake backends, no GPU
 handoff-router --config config/router-backends.example.yaml --print-config
 ```
 
-Before opening a PR, replace the `your-org` placeholder URLs in `pyproject.toml`,
-`README.md`, `docs/DEPLOY.md`, and `deploy/systemd/*` with your repository path.
+Before the **first public release**, the maintainer runs
+`python3 scripts/prepare_release.py OWNER/handoff-router` and then `--check` to
+replace all provisional URLs. Contributors need not rewrite these links in PRs.
 
 ## Where to work
 
@@ -43,14 +44,15 @@ Before opening a PR, replace the `your-org` placeholder URLs in `pyproject.toml`
 `index.html` at the repository root is the GitHub Pages site (self-contained: no
 build step, no external assets, `.nojekyll` is present). Publish it with
 **Settings → Pages → Deploy from a branch → `main` → `/ (root)`**. Update the
-`your-org` URLs in `index.html` when you rename the repo. Keep the comparison
-section factual: it is the part people judge us on.
+the GitHub URLs via `scripts/prepare_release.py` before publishing. Keep the
+comparison section factual: it is the part people judge us on.
 
 ## Test expectations
 
 Every behaviour change needs a test in `tests/`. Lifecycle changes need
 `tests/test_router.py` (fake backends, real subprocesses, real TCP/SSE);
-operator-facing features go in `tests/test_features.py`. Tests must not require a
+operator-facing features go in `tests/test_features.py`; audit regressions live
+in `tests/test_audit_regressions.py`. Tests must not require a
 GPU, a model file, or network access.
 
 ## Style

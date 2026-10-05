@@ -7,7 +7,7 @@ After=network-online.target
 [Service]
 Type=simple
 Environment=HANDOFF_ROUTER_CONFIG=%h/.config/handoff-router/router-backends.yaml
-ExecStart=%h/.local/bin/handoff-router --config %h/.config/handoff-router/router-backends.yaml --host 0.0.0.0 --port 8081
+ExecStart=%h/.local/bin/handoff-router --config %h/.config/handoff-router/router-backends.yaml --host 127.0.0.1 --port 8081
 Restart=on-failure
 RestartSec=5
 

@@ -4,7 +4,8 @@
 
 An OpenAI-compatible facade that supervises llama.cpp, Strata, vLLM, SGLang,
 NInfer — *any* local model server — as backends of a single public endpoint, and
-hands the GPU from one engine to the next without the two ever overlapping.
+hands the GPU from one large engine to the next without two non-resident
+backends overlapping (small `resident` sidecars may coexist).
 
 ```
 your clients ───────────────► :8081  Handoff Router
@@ -43,12 +44,12 @@ forwarded chunk by chunk; only the `model` field is rewritten.
 | **Drain before destroy** | in-flight generations finish first (`drain_timeout_seconds`); a slow client fails the switch, it never cuts a stream |
 | **llama.cpp native** | `--models-preset` presets become addressable model IDs automatically; `/props`, `/slots`, `/models/sse` and the llama.cpp web UI keep working — even against non-llama.cpp engines (props are synthesized) |
 | **Zero-diff adoption** | a launcher shim lets your existing systemd unit, port, and API key stay exactly as they are |
-| **Config hot reload** | edit `router-backends.yaml` while serving; the active model is never restarted. Changed launch lines apply on the next switch |
+| **Config hot reload** | reload does not stop a live backend; changed launch lines apply on that backend's next request, after its leases drain |
 | **Idle reclaim** | per-backend `idle_ttl_seconds`, cheap-first by `evict_cost`, `resident: true` for sidecars you want to keep |
 | **Coexistence** | `resident` backends (embedders, rerankers) survive a big-model switch instead of being evicted |
 | **Operator control plane** | `POST /router/freeze|thaw` windows for other GPU work, `GET /router/activity`, `GET /activity/stream`, `GET /logs/<backend>`, `POST /router/reload` |
 | **Crash recovery** | persisted pid/pgid/boot-id state; healthy groups are adopted, stale ones reaped, foreign boots ignored |
-| **Tested without a GPU** | 28 integration tests against fake backends: switch matrix, coalescing, draining, cancellation, adoption, VRAM gate, reload, idle reclaim |
+| **Tested without a GPU** | integration tests against fake backends: switch matrix, coalescing, draining, cancellation, adoption, VRAM gate, reload, idle reclaim |
 
 ---
 
@@ -65,7 +66,7 @@ curl -o ~/.config/handoff-router/router-presets.ini \
   $BASE/router-presets.example.ini   # only if you run llama.cpp's --models-preset router
 # then edit: engine commands, ports, process_match fingerprints
 
-# resolve every path and sanity-check the config without touching the GPU
+# resolve settings paths and explicit ./command paths without touching the GPU
 handoff-router --config ~/.config/handoff-router/router-backends.yaml --print-config
 
 handoff-router --config ~/.config/handoff-router/router-backends.yaml --port 8081 --api-key "$KEY"
@@ -81,10 +82,14 @@ python3 scripts/routerctl.py status      # who owns the GPU right now
 python3 scripts/routerctl.py activity    # what happened, with durations
 ```
 
-Already running llama.cpp's router under systemd? Don't rewrite anything:
+Already running llama.cpp's router under systemd? The shim preserves its unit,
+port, and API key. **Back up your binary and review the [migration steps](docs/DEPLOY.md#5-adopting-it-onto-an-existing-llamacpp-router-install-zero-client-change) before restarting.**
 
 ```bash
-deploy/install-dispatcher.sh && systemctl restart llama-router
+HANDOFF_ROUTER_CONFIG=$HOME/.config/handoff-router/router-backends.yaml \
+HANDOFF_ROUTER_PRESET=$HOME/Models/router-presets.ini \
+  deploy/install-dispatcher.sh
+# then, during a planned maintenance window: systemctl restart llama-router
 ```
 
 Full guide: **[docs/DEPLOY.md](docs/DEPLOY.md)**.
@@ -142,19 +147,29 @@ think they do better and would happily steal.
 
 ---
 
+## Publishing
+
+Choose the GitHub owner/repository before publishing; the URLs deliberately
+remain provisional until then:
+
+```bash
+python3 scripts/prepare_release.py OWNER/handoff-router
+python3 scripts/prepare_release.py --check
+```
+
 ## Development
 
 ```bash
 pip install -e ".[dev]"
-pytest -q            # 28 tests, fake backends, no GPU, ~14s
+pytest -q            # fake backends, no GPU
 ```
 
 ## Safety notes
 
 - Backends bind to `127.0.0.1`; only the facade port is reachable.
-- `/router/reload` reads a file that launches arbitrary commands. **Treat the API
-  key as root-equivalent on that host**, and bind the facade to a trusted network
-  or a TLS-terminating proxy.
+- The facade binds `127.0.0.1` by default; non-loopback binds require an API
+  key. `/router/reload` can execute commands **as the router's service user**
+  if an attacker can also write its config. Use a trusted network or TLS proxy.
 - Set the cgroup memory caps drop-in (`deploy/systemd/memory-guard.conf.example`)
   so a runaway load degrades instead of freezing the machine.
 
@@ -163,7 +178,7 @@ pytest -q            # 28 tests, fake backends, no GPU, ~14s
 Built on llama.cpp's own multi-model router (`--models-preset`, `--models-max`).
 Ideas borrowed openly from llama-swap's `groups`/`matrix` router, `ttl`, and
 streamed logs, and from Ollama's VRAM-fit scheduler. Nothing here is a claim that
-those projects should be replaced — this is the piece they do not cover.
+those projects should be replaced; this is one focused integration of those ideas.
 
 ## License
 

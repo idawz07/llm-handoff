@@ -1,7 +1,7 @@
 # System-wide unit. Replace HANDOFF_USER with the account that owns the model
 # files and GPU access (never root), and adjust the absolute paths.
 #   sudo cp deploy/systemd/handoff-router.service /etc/systemd/system/
-#   sudo systemctl daemon-reload && sudo systemctl enable --now handoff-router
+#   Create /etc/handoff-router/env with an API key BEFORE enabling this unit.
 # A root-owned unit does not need to change when you adopt Handoff Router over an
 # existing llama.cpp router install - see docs/DEPLOY.md "Option B: shim".
 [Unit]
@@ -17,8 +17,8 @@ Group=HANDOFF_USER
 Environment=HANDOFF_ROUTER_CONFIG=/home/HANDOFF_USER/.config/handoff-router/router-backends.yaml
 # Keep secrets out of the unit file:
 #   /etc/handoff-router/env  ->  HANDOFF_ROUTER_API_KEY=...
-EnvironmentFile=-/etc/handoff-router/env
-ExecStart=/home/HANDOFF_USER/.local/bin/handoff-router \
+EnvironmentFile=/etc/handoff-router/env
+ExecStart=/opt/handoff-router/bin/handoff-router \
   --config /home/HANDOFF_USER/.config/handoff-router/router-backends.yaml \
   --host 0.0.0.0 --port 8081
 Restart=on-failure

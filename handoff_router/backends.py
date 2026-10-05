@@ -216,7 +216,9 @@ class BackendAdapter:
             return False
         try:
             pgid = os.getpgid(pid)
-        except (ProcessLookupError, PermissionError):
+            if psutil.Process(pid).uids().real != os.getuid():
+                return False
+        except (ProcessLookupError, PermissionError, psutil.Error):
             return False
         # Never adopt a listener from an unrelated shell/session and later send
         # a group signal to that shell. All supported launchers are session
@@ -299,7 +301,9 @@ class BackendAdapter:
         return await asyncio.to_thread(inspect)
 
     def process_matches(self, pid: int) -> bool:
-        if not self._pid_alive(pid):
+        # all([]) is true: without this guard any unrelated session leader on
+        # the configured port could be adopted and later killed by killpg().
+        if not self.config.process_match or not self._pid_alive(pid):
             return False
         try:
             command = Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace")

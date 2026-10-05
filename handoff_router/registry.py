@@ -71,6 +71,8 @@ class BackendConfig:
     @property
     def port(self) -> int:
         parsed = urlparse(self.upstream)
+        if parsed.scheme not in ("http", "https") or not parsed.hostname:
+            raise ValueError(f"backend {self.name!r} upstream must be an http(s) URL: {self.upstream!r}")
         if parsed.port is not None:
             return parsed.port
         return 443 if parsed.scheme == "https" else 80
@@ -113,8 +115,13 @@ class ModelRegistry:
     def from_file(cls, path: str | Path) -> "ModelRegistry":
         registry_path = Path(path).expanduser().resolve()
         raw = yaml.safe_load(registry_path.read_text()) or {}
+        if not isinstance(raw, dict):
+            raise ValueError("router config must be a YAML mapping")
+        for section in ("settings", "backends", "models"):
+            if raw.get(section) is not None and not isinstance(raw[section], dict):
+                raise ValueError(f"{section} must be a YAML mapping")
         base = registry_path.parent
-        raw_settings = raw.get("settings", {})
+        raw_settings = raw.get("settings") or {}
 
         def resolved_path(value: str | None, default: str | None = None) -> Path | None:
             selected = value if value is not None else default
@@ -122,6 +129,15 @@ class ModelRegistry:
                 return None
             expanded = Path(os.path.expandvars(os.path.expanduser(selected)))
             return (base / expanded).resolve() if not expanded.is_absolute() else expanded.resolve()
+
+        def command_part(value: Any) -> str:
+            raw = str(value)
+            expanded = os.path.expandvars(os.path.expanduser(raw))
+            # Bare command names and model IDs are passed through. Explicit
+            # relative paths are relative to this YAML file, not systemd's /.
+            if raw.startswith(("./", "../")):
+                return str((base / expanded).resolve())
+            return expanded
 
         settings = RouterSettings(
             state_dir=resolved_path(raw_settings.get("state_dir"), "~/.local/state/handoff-router"),  # type: ignore[arg-type]
@@ -149,13 +165,28 @@ class ModelRegistry:
 
         backends: dict[str, BackendConfig] = {}
         for name, item in (raw.get("backends") or {}).items():
-            command = tuple(os.path.expandvars(os.path.expanduser(str(part))) for part in item.get("command", []))
+            if not isinstance(item, dict):
+                raise ValueError(f"backend {name!r} must be a YAML mapping")
+            if not isinstance(item.get("command", []), list):
+                raise ValueError(f"backend {name!r} command must be a list of argv entries")
+            if "upstream" not in item:
+                raise ValueError(f"backend {name!r} has no upstream URL")
+            if not isinstance(item.get("process_match", []), list):
+                raise ValueError(f"backend {name!r} process_match must be a list")
+            if not isinstance(item.get("environment") or {}, dict):
+                raise ValueError(f"backend {name!r} environment must be a mapping")
+            command = tuple(command_part(part) for part in item.get("command", []))
             if not command:
                 raise ValueError(f"backend {name!r} has no command")
             environment = {
                 str(key): os.path.expandvars(os.path.expanduser(str(value)))
                 for key, value in (item.get("environment") or {}).items()
             }
+            if bool(item.get("adopt_existing", True)) and not item.get("process_match"):
+                raise ValueError(
+                    f"backend {name!r} enables adoption without process_match; "
+                    "provide a unique command-line fingerprint or set adopt_existing: false"
+                )
             backends[name] = BackendConfig(
                 name=name,
                 adapter=str(item.get("adapter", name)).lower(),
@@ -163,10 +194,7 @@ class ModelRegistry:
                 upstream=str(item["upstream"]).rstrip("/"),
                 health_endpoint=str(item.get("health_endpoint", "/health")),
                 environment=environment,
-                process_match=tuple(
-                    os.path.expandvars(os.path.expanduser(str(value)))
-                    for value in item.get("process_match", [])
-                ),
+                process_match=tuple(command_part(value) for value in item.get("process_match", [])),
                 startup_timeout_seconds=(
                     float(item["startup_timeout_seconds"])
                     if "startup_timeout_seconds" in item
@@ -226,6 +254,8 @@ class ModelRegistry:
         }
 
         for model_id, item in (raw.get("models") or {}).items():
+            if not isinstance(item, dict) or "backend" not in item:
+                raise ValueError(f"model {model_id!r} must define a backend")
             backend = str(item["backend"])
             if backend not in backends:
                 raise ValueError(f"model {model_id!r} references unknown backend {backend!r}")

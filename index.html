@@ -58,6 +58,7 @@
   .c{color:#6f7d8c}.k{color:#8fd6ff}.s{color:#c7e79a}.n{color:#f0b667}
   .diagram{background:var(--bg-soft);border:1px solid var(--line);border-radius:14px;padding:22px 18px;overflow:auto}
   .diagram pre{background:none;border:0;padding:0;margin:0;font-size:13px;line-height:1.55;color:var(--ink-dim);white-space:pre}
+  .table-scroll{max-width:100%;overflow-x:auto;overscroll-behavior-x:contain}
   table{width:100%;border-collapse:collapse;margin-top:22px;font-size:14.6px}
   th,td{text-align:left;padding:11px 12px;border-bottom:1px solid var(--line);vertical-align:top}
   th{color:var(--ink-faint);font-weight:600;font-size:12.6px;text-transform:uppercase;letter-spacing:.07em}
@@ -81,6 +82,15 @@
   footer{padding:44px 0 60px;color:var(--ink-faint);font-size:14.4px}
   footer .row{margin-top:12px}
   .pill{display:inline-block;border:1px solid var(--line);border-radius:999px;padding:.24em .7em;margin:0 6px 6px 0;font-size:12.6px;color:var(--ink-dim);font-family:var(--mono)}
+  @media (max-width:700px){
+    header{position:relative}
+    nav{height:auto;flex-wrap:wrap;gap:10px;padding:12px 0}
+    .brand{width:100%}
+    nav .links{margin-left:0;width:100%;max-width:100%;gap:18px;overflow-x:auto;flex-wrap:nowrap;white-space:nowrap;padding-bottom:4px}
+    .hero{padding:60px 0 54px}
+    .g2,.g3{grid-template-columns:minmax(0,1fr)}
+    .table-scroll table{min-width:660px}
+  }
 </style>
 </head>
 <body>
@@ -113,12 +123,12 @@
       engine that owns that model.
     </p>
     <div class="row">
-      <a class="btn primary" href="#quickstart">Get running in 4 commands</a>
+      <a class="btn primary" href="#quickstart">Get running in 5 steps</a>
       <a class="btn ghost" href="https://github.com/your-org/handoff-router/blob/main/docs/COMPARISON.md">How it differs from llama-swap</a>
       <a class="btn ghost" href="https://github.com/your-org/handoff-router">Source</a>
     </div>
     <p class="meta" style="margin-top:26px">
-      Python · MIT · no GPU needed for the 28-test suite · runs on llama.cpp's own
+      Python · MIT · no GPU needed for the integration suite · runs on llama.cpp's own
       <code>--models-preset</code> router · proven on a single RTX 5090 between a 125B MoE,
       a 27B NVFP4 stack, and llama.cpp presets
     </p>
@@ -233,7 +243,7 @@
         <p>Free-VRAM threshold, process-group teardown, one switch lock, and a lease
         reserved before the lock is released — the four things that stop overlapping loads.</p></div>
       <div class="card"><div class="ic">adoption</div><h3>Adopt, don't duplicate</h3>
-        <p>Healthy leftovers — from a crash, a reboot, a job runner, or your own
+        <p>Healthy leftovers — from a router crash, a job runner, or your own
         <code>tmux</code> — are matched by command-line fingerprint and taken over.</p></div>
       <div class="card"><div class="ic">llama.cpp first</div><h3>Your presets stay yours</h3>
         <p>Every <code>--models-preset</code> section becomes an addressable model ID
@@ -245,12 +255,12 @@
         systemd unit, port, and API key never change. Only the router invocation enters
         the facade; everything else delegates byte-for-byte.</p></div>
       <div class="card"><div class="ic">no cold reload</div><h3>Config hot reload</h3>
-        <p>Edit <code>router-backends.yaml</code> while serving. The active model is never
-        restarted; changed launch lines apply on the next switch; a broken file is rejected
-        and the running config stays.</p></div>
+        <p>Edit <code>router-backends.yaml</code> while serving. Reload never stops a
+        live process; changed launch lines apply on its next request after leases drain.
+        A broken file leaves the running config intact.</p></div>
       <div class="card"><div class="ic">reclaim</div><h3>Idle TTL, cheap first</h3>
         <p><code>idle_ttl_seconds</code> per backend, eviction ordered by
-        <code>evict_cost</code>, negative values pin a model in VRAM. Off by default:
+        <code>evict_cost</code>; negative values opt out of idle reclaim. Off by default:
         keep a three-minute load warm until something else needs the card.</p></div>
       <div class="card"><div class="ic">coexist</div><h3>Resident sidecars</h3>
         <p>Embedders, rerankers, and small models marked <code>resident: true</code> survive
@@ -266,7 +276,7 @@
       <div class="card"><div class="ic">recovery</div><h3>Crash-proof state</h3>
         <p>pid/pgid/boot-id persisted atomically. On restart: adopt what is healthy,
         reap what is stale, ignore what belongs to another boot.</p></div>
-      <div class="card"><div class="ic">tested</div><h3>28 tests, no GPU</h3>
+      <div class="card"><div class="ic">tested</div><h3>Integration tests, no GPU</h3>
         <p>Real subprocesses and real TCP/SSE against fake backends: the whole switch
         matrix, coalescing, draining, cancellation mid-start, adoption, recovered process
         groups, the VRAM gate, reload, idle reclaim, coexistence.</p></div>
@@ -311,7 +321,7 @@ GET  /logs/llamacpp?lines=200</code></pre>
           <li><code>config_reload</code> / <code>config_reload_failed</code> — who changed what,
             and whether it was rejected.</li>
           <li><code>restart_pending</code> in <code>/router/status</code> — a config edit that
-            applies on the next switch.</li>
+            applies on that backend's next request.</li>
         </ul>
         <p class="meta" style="margin-top:18px">One helper for all of it:
         <code>scripts/routerctl.py status | models | load | unload | freeze | thaw | reload |
@@ -327,6 +337,7 @@ GET  /logs/llamacpp?lines=200</code></pre>
     <p class="lede">Verified against upstream docs in October 2026. The honest summary:
       use those projects for breadth; use this for a single card that must be handed
       between runtimes which each want all of it.</p>
+    <div class="table-scroll" role="region" aria-label="Comparison table" tabindex="0">
     <table>
       <thead><tr>
         <th>Capability</th><th>Handoff Router</th><th>llama-swap</th><th>Ollama</th><th>GPUStack</th>
@@ -347,6 +358,7 @@ GET  /logs/llamacpp?lines=200</code></pre>
         <tr><td>shape</td><td>Python, 1 process</td><td>Go binary</td><td>Go daemon</td><td>cluster manager</td></tr>
       </tbody>
     </table>
+    </div>
     <div class="callout">
       <strong>Things we would happily take back upstream.</strong> llama-swap's
       <code>matrix</code> coexistence solver and <code>evict_costs</code> are strictly more
@@ -377,6 +389,7 @@ GET  /logs/llamacpp?lines=200</code></pre>
 <pre><code><span class="c"># moves llama-server aside, leaves a narrow shim in its place:</span>
 <span class="c"># only the --models-preset + --port 8081 invocation enters the facade,</span>
 <span class="c"># every other llama-server call delegates byte-for-byte to llama-server.real</span>
+HANDOFF_ROUTER_CONFIG=$HOME/.config/handoff-router/router-backends.yaml \
 HANDOFF_ROUTER_PRESET=$HOME/Models/router-presets.ini \
   deploy/install-dispatcher.sh
 systemctl restart llama-router          <span class="c"># your existing unit, port, and key</span>
@@ -406,16 +419,16 @@ curl -H "Authorization: Bearer $KEY" localhost:8081/router/status</code></pre>
         engines that cannot live inside it beside it.</p></div>
       <div class="card"><h3>Will it unload the model I'm using?</h3>
         <p>Not unless you ask. Idle reclaim is off by default (<code>idle_ttl_seconds: 0</code>),
-        protected by <code>idle_grace_seconds</code>, never runs while a request is in flight,
-        and can pin a backend with a negative TTL.</p></div>
+        protected by <code>idle_grace_seconds</code>, never unloads a backend with
+        active requests, and can exclude a backend with a negative TTL.</p></div>
       <div class="card"><h3>Multi-GPU?</h3>
         <p>No. The scope is deliberately one card: the failure mode it prevents is
         two-big-loads-on-one-GPU. For placement across cards and nodes, GPUStack or a
         Kubernetes path is the right tool.</p></div>
       <div class="card"><h3>Is the API key enough?</h3>
-        <p>On that host, yes — treat it as root-equivalent, because
-        <code>POST /router/reload</code> re-reads a config that launches arbitrary commands.
-        Bind the facade to a trusted network or put auth and TLS at a reverse proxy.</p></div>
+        <p>The key controls inference and model switching. If someone can also edit
+        your config, <code>POST /router/reload</code> can launch commands as the router's
+        service user. Bind it to a trusted network or use a TLS reverse proxy.</p></div>
       <div class="card"><h3>What is missing?</h3>
         <p>Anthropic <code>/v1/messages</code>, image/audio endpoints, a first-class metrics
         exporter, richer coexistence solving, non-Linux process handling, and a web UI of our

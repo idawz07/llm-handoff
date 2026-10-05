@@ -14,7 +14,7 @@ Control plane (authenticated when an API key is configured):
 | `GET /health` | active model/backend + upstream health |
 | `GET /router/status` | full state: frozen, active, switching_to, per-backend pid/pgid/running/resident/evict_cost/idle_seconds/restart_pending, config path + watched flag |
 | `POST /models/load` `{"model": id}` | warm a model now (switches engine if needed) and block until servable |
-| `POST /models/unload` `{"model": id}` | drain, stop that backend's process group, wait for the GPU gate |
+| `POST /models/unload` `{"model": id}` | stop a single-engine backend after **its** leases drain; for llama.cpp, forward to its native router without starting a backend |
 | `POST /router/freeze` / `POST /router/thaw` | block/allow model loads while other GPU work runs |
 | `POST /router/reload` | re-read `router-backends.yaml` (no process restart, no model restart) |
 | `GET /router/activity?limit=N&since=ts` | recent lifecycle events |
@@ -30,9 +30,9 @@ request for model M
   └ switch_lock
       ├ resolve M -> backend B
       ├ if B active & healthy ...................... reuse (no restart)
-      ├ else: drain in-flight requests (<= drain_timeout_seconds)
-      ├ stop previous backend process group (SIGTERM -> SIGKILL)
-      ├ resident backends are left running on purpose
+      ├ else: drain only the backend(s) that must stop (<= drain_timeout_seconds)
+      ├ stop previous non-resident process group(s) (SIGTERM -> SIGKILL)
+      ├ resident backends are left running in either switch direction
       ├ GPU gate: wait for min_free_vram_mib free, OR adopt an external copy
       ├ start B (start_new_session -> own process group)
       ├ wait: /health 200 -> model actually loaded (adapter-specific)
@@ -79,13 +79,15 @@ The watcher (or `POST /router/reload`) applies a config edit like this:
 | new model / metadata edit | live immediately |
 | new backend | usable on the next request that names it |
 | edit to a **stopped** backend | live immediately |
-| edit to a **running** backend | the new launch line is applied on the **next switch** to that backend (`restart_pending: true` in status); an idle changed backend is stopped right away |
-| remove a backend (idle) | stopped, then forgotten |
-| remove a backend (active) | kept until the next switch, and reported |
-| broken YAML / bad reference | rejected: the running config stays, `config_reload_failed` is recorded, `POST /router/reload` answers 503 |
+| edit to a **running** backend | old adapter/URL stays immutable for existing leases; the new config **and adapter class** apply on the next request to that backend, after its leases drain (`restart_pending` in status) |
+| remove a backend (idle) | marked retired; reaper stops it on the next poll (never within the reload call) |
+| remove a backend (selected or with active leases) | kept until its own leases finish and it is switched away from; reported as `retired` |
+| change `state_dir` or upstream HTTP timeouts | rejected; change these during a full service restart |
+| broken YAML / bad reference / unsupported adapter | rejected before any live state changes; `config_reload_failed` is recorded, `POST /router/reload` answers 503 |
 
-The active model is **never** killed by a reload. That is the whole point: adding
-a checkpoint should not cost you a three-minute cold load.
+No process is stopped *inside* reload. Existing leases retain their original
+upstream address; adding a checkpoint cannot cut a stream. Idle TTL starts when
+the last proxied request completes, not when it began.
 
 ## Logs
 

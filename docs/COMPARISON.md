@@ -47,7 +47,7 @@ runtime, which may itself host many models).
 | Non-LLM endpoints (SDAPI, audio.cpp, ComfyUI) | ❌ | ✅ | ❌ | ✅ | ❌ |
 | Aliases, per-model API keys, macros/hooks, profiles | partial (selector IDs, metadata) | ✅ rich | ✅ | ✅ | ✅ |
 | Kubernetes deployment | docs-level | ✅ `kubeswap` | ✅ | ✅ | ✅ |
-| Test suite without a GPU | ✅ 28 tests, fake backends | ✅ | ✅ | ✅ | ✅ |
+| Test suite without a GPU | ✅ integration tests, fake backends | ✅ | ✅ | ✅ | ✅ |
 
 ---
 
