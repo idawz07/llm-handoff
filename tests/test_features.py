@@ -83,9 +83,12 @@ def make_config(tmp_path: Path, **settings_override) -> Config:
 
     def backend(name: str, served: str, **extra):
         adapter = "llamacpp" if name == "llamacpp" else ("ninfer" if name == "ninfer" else "vllm")
+        command = config.command(name, served)
+        if name == "llamacpp":
+            command += ["--models-preset", str(presets)]
         return {
             "adapter": adapter,
-            "command": config.command(name, served),
+            "command": command,
             "upstream": f"http://127.0.0.1:{ports[name]}",
             "health_endpoint": "/health",
             "startup_timeout_seconds": 5,

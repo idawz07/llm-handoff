@@ -22,6 +22,7 @@ def parse_args():
     parser.add_argument("--active-dir", required=True)
     parser.add_argument("--counter-dir", required=True)
     parser.add_argument("--startup-delay", type=float, default=0)
+    parser.add_argument("--models-preset")  # native llama.cpp router fixture
     parser.add_argument("--fail-start", action="store_true")
     return parser.parse_args()
 

@@ -8,10 +8,16 @@ ROOT="${HANDOFF_LLAMA_ROOT:-${LLAMA_SERVER_ROOT:-$HOME/llama.cpp}}"
 TARGET="$ROOT/build/bin/llama-server"
 REAL="$ROOT/build/bin/llama-server.real"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-WRAPPER="${HANDOFF_DISPATCHER:-$HERE/dispatcher.sh}"
+WRAPPER_SOURCE="${HANDOFF_DISPATCHER:-$HERE/dispatcher.sh}"
+# The runtime service may use a different account or the checkout may move.
+# Install a stable, world-readable copy next to llama-server instead of
+# executing a script from the installer's home directory.
+WRAPPER="$TARGET.handoff-dispatcher"
 
 [[ -x "$TARGET" ]] || { echo "missing executable: $TARGET" >&2; exit 1; }
-[[ -x "$WRAPPER" ]] || { echo "missing executable dispatcher: $WRAPPER" >&2; exit 1; }
+[[ -x "$WRAPPER_SOURCE" && -r "$WRAPPER_SOURCE" ]] || {
+  echo "missing readable executable dispatcher: $WRAPPER_SOURCE" >&2; exit 1;
+}
 # The installer receives these values once. The generated shim must persist
 # them because systemd does NOT inherit an install command's environment.
 : "${HANDOFF_ROUTER_CONFIG:?set HANDOFF_ROUTER_CONFIG to the absolute YAML path}"
@@ -64,8 +70,12 @@ else
   mv -- "$REAL.staging.$$" "$REAL"
 fi
 
+wrapper_staging="$(mktemp "$WRAPPER.handoff.XXXXXXXX")"
 shim="$(mktemp "$TARGET.handoff.XXXXXXXX")"
-trap 'rm -f -- "$shim"' EXIT
+trap 'rm -f -- "$wrapper_staging" "$shim"' EXIT
+cp -- "$WRAPPER_SOURCE" "$wrapper_staging"
+chmod 755 "$wrapper_staging"
+mv -f -- "$wrapper_staging" "$WRAPPER"
 {
   printf '#!/usr/bin/env bash\n# HANDOFF_ROUTER_DISPATCHER\n'
   printf 'export HANDOFF_SERVER_REAL=%q\n' "$REAL"
@@ -85,7 +95,7 @@ trap 'rm -f -- "$shim"' EXIT
   printf 'export HANDOFF_ROUTER_RUNNER="${HANDOFF_ROUTER_RUNNER:-$HANDOFF_DEFAULT_RUNNER}"\n'
   printf 'exec %q "$@"\n' "$WRAPPER"
 } > "$shim"
-chmod +x "$shim"
+chmod 755 "$shim"
 mv -f -- "$shim" "$TARGET"
 trap - EXIT
 printf 'Installed dispatcher at %s (real binary: %s)\n' "$TARGET" "$REAL"

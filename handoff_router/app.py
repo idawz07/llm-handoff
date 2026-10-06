@@ -287,7 +287,13 @@ def create_app(
         model = router_manager.registry.resolve(model_id) if isinstance(model_id, str) else None
         if model is None:
             return openai_error(f"model {model_id!r} not found", 404, "invalid_request_error")
-        if router_manager.adapters[model.backend].config.adapter == "llamacpp":
+        adapter = router_manager.adapters[model.backend]
+        # Only llama.cpp's --models-preset router has a native child-model
+        # unload. A standalone llama-server (including the example embedder)
+        # must be stopped as a process, just like every other single-engine
+        # backend. Checking the running adapter's command also handles reloads
+        # that have staged a different command for its next start.
+        if adapter.config.adapter == "llamacpp" and "--models-preset" in adapter.config.command:
             if not router_manager.adapters[model.backend].is_running():
                 return JSONResponse({"success": True, "stopped": False})
             response = await _proxy_request(

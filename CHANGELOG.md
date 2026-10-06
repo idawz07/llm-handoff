@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.2.2 — release audit follow-up
+
+- Reject duplicate backend ports and refuse a hot-reload rename that would
+  let two adapters adopt the same running process and kill an in-flight stream.
+- Leave matching external listeners that are still loading alone at startup;
+  fail and retry instead of terminating a process just because health is 503.
+- Stop standalone llama.cpp servers (including the sample embedder) for
+  `/models/unload`; forward native unload only to `--models-preset` routers.
+- Install a readable shim and a stable dispatcher helper beside the real
+  binary, independent of checkout location and installer account.
+- Increase the default shutdown drain to 300 seconds; align example service
+  stop grace with its 1800-second drain, and document the bounded cutoff.
+- Fix pipx-only configuration instructions and add regressions for the above.
+
 ## 0.2.1 — safety and deployment audit
 
 - Require configured keys for legacy inference routes and `/props`, including

@@ -172,6 +172,9 @@ pytest -q            # fake backends, no GPU
   if an attacker can also write its config. Use a trusted network or TLS proxy.
 - Set the cgroup memory caps drop-in (`deploy/systemd/memory-guard.conf.example`)
   so a runaway load degrades instead of freezing the machine.
+- Each backend needs a distinct port. During shutdown, streams get a bounded
+  grace period (`shutdown_drain_timeout_seconds`), after which backends stop;
+  plan upgrades while idle and set the service stop timeout above that period.
 
 ## Credits and lineage
 

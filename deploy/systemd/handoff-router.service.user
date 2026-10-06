@@ -10,6 +10,8 @@ Environment=HANDOFF_ROUTER_CONFIG=%h/.config/handoff-router/router-backends.yaml
 ExecStart=%h/.local/bin/handoff-router --config %h/.config/handoff-router/router-backends.yaml --host 127.0.0.1 --port 8081
 Restart=on-failure
 RestartSec=5
+# Must exceed shutdown_drain_timeout_seconds + backend stop timeout.
+TimeoutStopSec=2100
 
 [Install]
 WantedBy=default.target

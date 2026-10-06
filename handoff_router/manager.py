@@ -96,8 +96,12 @@ class RouterManager:
                 self.active_backend = state_backend
                 LOG.info("adopted persisted backend %s pid=%s", state_backend, state_pid)
             elif adapter.runtime is not None:
-                LOG.warning("terminating unhealthy persisted backend %s pid=%s", state_backend, state_pid)
-                await adapter.stop()
+                # A listener can return 503 while loading a large checkpoint.
+                # A matching command is not proof that we may kill that load.
+                raise RuntimeError(
+                    f"backend {state_backend} pid {state_pid} is listening but not healthy yet; "
+                    "leaving it running (retry when ready)"
+                )
             elif adapter.adopt_persisted_group(process_state):
                 LOG.warning(
                     "terminating orphaned persisted process group backend=%s pgid=%s",
@@ -116,8 +120,10 @@ class RouterManager:
                 adopted.append(backend_name)
                 LOG.info("discovered existing backend %s pid=%s", backend_name, pid)
             elif adapter.runtime is not None:
-                LOG.warning("terminating unhealthy listener for backend %s pid=%s", backend_name, pid)
-                await adapter.stop()
+                raise RuntimeError(
+                    f"backend {backend_name} pid {pid} is listening but not healthy yet; "
+                    "leaving it running (retry when ready)"
+                )
             else:
                 raise RuntimeError(
                     f"backend {backend_name} is listening with pid {pid}, but its process "
@@ -281,8 +287,16 @@ class RouterManager:
                 # Preflight every adapter before changing any state. A bad
                 # adapter name must not leave the running registry half-updated.
                 prepared = {name: create_adapter(cfg, fresh.settings) for name, cfg in fresh.backends.items()}
-                for cfg in fresh.backends.values():
-                    _ = cfg.port
+                # A rename or port reassignment cannot give a still-running old
+                # process two owners. Even if the old name is being retired,
+                # it may have a stream that must finish on its original adapter.
+                for new_name, cfg in fresh.backends.items():
+                    for old_name, old in self.adapters.items():
+                        if old_name != new_name and old.is_running() and cfg.port == old.config.port:
+                            raise ValueError(
+                                f"backend {new_name!r} shares port {cfg.port} with running "
+                                f"backend {old_name!r}; unload it before reusing its port"
+                            )
             except Exception as exc:
                 try:
                     self._last_failed_mtime = self.config_path.stat().st_mtime
@@ -623,6 +637,16 @@ class RouterManager:
                 if not target.is_running():
                     listener = await target.discover_listener_pid()
                     if listener is not None:
+                        if any(
+                            name != model.backend and adapter.is_running()
+                            and adapter.runtime is not None and adapter.runtime.pid == listener
+                            for name, adapter in self.adapters.items()
+                        ):
+                            raise ModelSwitchError(
+                                f"backend {model.backend} port is already owned by another backend "
+                                f"(pid {listener}); use dedicated ports",
+                                backend=model.backend,
+                            )
                         if await self._probe_upstream_health(target) and target.adopt(listener):
                             LOG.info(
                                 "%s: adopting externally started backend pid=%d instead of starting one",
@@ -781,6 +805,16 @@ class RouterManager:
             listener = await target.discover_listener_pid()
             if listener is not None:
                 last_listener = listener
+                if any(
+                    adapter is not target and adapter.is_running()
+                    and adapter.runtime is not None and adapter.runtime.pid == listener
+                    for adapter in self.adapters.values()
+                ):
+                    raise ModelSwitchError(
+                        f"backend {target.config.name} port is already owned by another "
+                        f"backend (pid {listener}); use dedicated ports",
+                        backend=target.config.name,
+                    )
                 stale_runtime = waiting_for_adopted_load and not target.is_running()
                 if (not waiting_for_adopted_load or stale_runtime) and target.adopt(listener):
                     waiting_for_adopted_load = True

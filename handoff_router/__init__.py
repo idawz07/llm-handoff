@@ -5,4 +5,4 @@ vLLM, SGLang, NInfer, or any other local server as mutually exclusive (or
 deliberately co-resident) backends on one GPU.
 """
 
-__version__ = "0.2.1"
+__version__ = "0.2.2"

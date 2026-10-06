@@ -2,6 +2,7 @@ services:
   handoff-router:
     build: .
     restart: unless-stopped
+    stop_grace_period: 2100s  # longer than shutdown drain + backend stop timeout
     ports: ["8081:8081"]
     environment:
       HANDOFF_ROUTER_API_KEY: "${HANDOFF_ROUTER_API_KEY:?set HANDOFF_ROUTER_API_KEY in .env}"

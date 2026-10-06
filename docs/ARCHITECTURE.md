@@ -39,8 +39,9 @@ of them is a bug, even if every test passes.
 6. **Adoption over duplication.** A healthy process matching `process_match` on
    the target port is adopted instead of starting a second copy for the same port
    and the same GPU. Adoption requires the pid to be its own process-group leader,
-   with the router's UID and a nonempty command-line fingerprint, so a group
-   signal cannot hit an unrelated shell or an arbitrary listener on the port.
+   with the router's UID and a nonempty command-line fingerprint. Ports must be
+   unique across backend names: one PID must never acquire two owners. A
+   matching listener that is still loading is left alone, not killed at startup.
 7. **Free the GPU before starting the next engine.** Process-group exit is the
    primary signal; `min_free_vram_mib` from `nvidia-smi` is the backstop for a
    consumer the router cannot identify.
@@ -49,8 +50,9 @@ of them is a bug, even if every test passes.
    is servable, so a client is never handed a 400 "model is not loaded".
 9. **Crash recovery is metadata, not a daemon.** `state.json` records
    `{active_backend, active_model, pid, pgid, boot_id, command}` atomically. On
-   restart, a matching healthy group is adopted; a stale group from the same boot
-   is terminated; anything from another boot is ignored.
+   restart, a matching healthy group is adopted; a matching unhealthy listener
+   is left running until it becomes healthy, while a verified orphaned process
+   group can be reclaimed; anything from another boot is ignored.
 10. **Reload never disturbs an existing lease.** Running adapters/URLs remain
     immutable until their own leases drain; changed config applies on the next
     request to that backend. Removed backends are retired only when safe.

@@ -23,6 +23,8 @@ ExecStart=/opt/handoff-router/bin/handoff-router \
   --host 0.0.0.0 --port 8081
 Restart=on-failure
 RestartSec=5
+# Must exceed shutdown_drain_timeout_seconds + backend stop timeout.
+TimeoutStopSec=2100
 LimitNOFILE=65536
 # An OOM-killed model child must take the whole supervision tree down so
 # Restart= starts a clean router instead of a parent retrying a dead backend.

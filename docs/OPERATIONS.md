@@ -14,7 +14,7 @@ Control plane (authenticated when an API key is configured):
 | `GET /health` | active model/backend + upstream health |
 | `GET /router/status` | full state: frozen, active, switching_to, per-backend pid/pgid/running/resident/evict_cost/idle_seconds/restart_pending, config path + watched flag |
 | `POST /models/load` `{"model": id}` | warm a model now (switches engine if needed) and block until servable |
-| `POST /models/unload` `{"model": id}` | stop a single-engine backend after **its** leases drain; for llama.cpp, forward to its native router without starting a backend |
+| `POST /models/unload` `{"model": id}` | stop a single-engine backend after **its** leases drain; only `llamacpp` backends launched with `--models-preset` forward to their native child-model unload |
 | `POST /router/freeze` / `POST /router/thaw` | block/allow model loads while other GPU work runs |
 | `POST /router/reload` | re-read `router-backends.yaml` (no process restart, no model restart) |
 | `GET /router/activity?limit=N&since=ts` | recent lifecycle events |
@@ -55,10 +55,10 @@ python3 scripts/routerctl.py freeze      # loads and switches now return 503
 python3 scripts/routerctl.py thaw
 ```
 
-Note on `/models/unload` parity: when the requested model belongs to the
-llama.cpp router backend, the call is forwarded to that child router so
-llama.cpp unloads its own LRU slot; for every other backend the facade stops the
-whole process group. `GET /v1/models` and `/models/sse` always reflect the
+Note on `/models/unload` parity: for a `llamacpp` backend launched with
+`--models-preset`, the call is forwarded to that child router so llama.cpp
+unloads its own LRU slot. Standalone llama.cpp servers (such as the example
+embedder) and all other backends stop the whole process group. `GET /v1/models` and `/models/sse` always reflect the
 facade's view, not the active engine's.
 
 `/models/unload` is deliberately **not** blocked by freeze: a window can still
@@ -83,11 +83,12 @@ The watcher (or `POST /router/reload`) applies a config edit like this:
 | remove a backend (idle) | marked retired; reaper stops it on the next poll (never within the reload call) |
 | remove a backend (selected or with active leases) | kept until its own leases finish and it is switched away from; reported as `retired` |
 | change `state_dir` or upstream HTTP timeouts | rejected; change these during a full service restart |
-| broken YAML / bad reference / unsupported adapter | rejected before any live state changes; `config_reload_failed` is recorded, `POST /router/reload` answers 503 |
+| broken YAML / bad reference / unsupported adapter / reused running port | rejected before any live state changes; `config_reload_failed` is recorded, `POST /router/reload` answers 503 |
 
 No process is stopped *inside* reload. Existing leases retain their original
-upstream address; adding a checkpoint cannot cut a stream. Idle TTL starts when
-the last proxied request completes, not when it began.
+upstream address; adding a checkpoint cannot cut a stream. A renamed backend
+must not reuse a running backend's port until the old backend is unloaded.
+Idle TTL starts when the last proxied request completes, not when it began.
 
 ## Logs
 
@@ -104,6 +105,9 @@ unaffected; the facade only captures what they print.
 - A cold load blocks the requesting client until the model is servable — set
   client read timeouts longer than `startup_timeout_seconds`.
 - Nothing unloads on its own unless you set an idle TTL.
+- Service shutdown is different from a switch: it waits up to
+  `shutdown_drain_timeout_seconds`, then stops backends even with live streams.
+  Align your systemd/Docker stop timeout and schedule upgrades when idle.
 
 ## Monitoring ideas
 

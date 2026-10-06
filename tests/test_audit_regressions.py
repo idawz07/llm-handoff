@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import subprocess
 import sys
@@ -17,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_features import free_port, make_config  # noqa: E402
 
 from handoff_router.app import _model_listing, create_app  # noqa: E402
-from handoff_router.manager import RouterManager  # noqa: E402
+from handoff_router.manager import ModelSwitchError, RouterManager  # noqa: E402
 from handoff_router.registry import ModelRegistry  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -359,6 +360,10 @@ def test_upgrading_a_legacy_dispatcher_keeps_real_binary_and_persists_paths(tmp_
     subprocess.run([str(ROOT / "deploy" / "install-dispatcher.sh")], env=install_env, check=True)
     assert real.read_text().startswith("#!/bin/sh\nprintf")  # the original was NOT overwritten
     assert list(binary.parent.glob("llama-server.legacy.*"))
+    installed_wrapper = binary.with_name("llama-server.handoff-dispatcher")
+    assert binary.stat().st_mode & 0o777 == 0o755
+    assert installed_wrapper.stat().st_mode & 0o777 == 0o755
+    assert str(installed_wrapper) in binary.read_text()
     runtime_env = {"HOME": str(tmp_path / "home"), "PATH": os.environ["PATH"]}
     routed = subprocess.run(
         [str(binary), "--models-preset", str(preset), "--port", "8081"],
@@ -377,7 +382,122 @@ def test_upgrading_a_legacy_dispatcher_keeps_real_binary_and_persists_paths(tmp_
     assert missing.returncode == 78 and "config missing" in missing.stderr
     subprocess.run([str(ROOT / "deploy" / "uninstall-dispatcher.sh")], env=install_env, check=True)
     assert not real.exists()
+    assert not installed_wrapper.exists()
     assert binary.read_text().startswith("#!/bin/sh\nprintf")
+
+
+@pytest.mark.asyncio
+async def test_rename_of_leased_resident_cannot_adopt_its_old_pid(tmp_path: Path):
+    config = make_config(tmp_path, watch_config=False)
+    doc = yaml.safe_load(config.path.read_text())
+    doc["backends"]["ninfer"]["resident"] = True
+    config.write(doc)
+    manager = RouterManager(ModelRegistry.from_file(config.path))
+    await manager.startup()
+    try:
+        old_lease = await manager.acquire("sidecar")
+        old_pid = old_lease.adapter.runtime.pid
+        doc = yaml.safe_load(config.path.read_text())
+        doc["backends"]["newembed"] = doc["backends"].pop("ninfer")
+        doc["models"]["sidecar"]["backend"] = "newembed"
+        config.write(doc)
+        with pytest.raises(ModelSwitchError, match="shares port.*running backend"):
+            await manager.reload()
+        assert manager.registry.resolve("sidecar").backend == "ninfer"
+        assert old_lease.adapter.is_running() and old_lease.adapter.runtime.pid == old_pid
+        await old_lease.release()
+        assert await manager.deactivate("sidecar") is True
+        result = await manager.reload()
+        assert result["success"] is True
+        new_lease = await manager.acquire("sidecar")
+        assert new_lease.adapter.runtime.pid != old_pid
+        await new_lease.release()
+    finally:
+        await manager.shutdown()
+
+
+def test_duplicate_backend_ports_are_rejected(tmp_path: Path):
+    config = make_config(tmp_path)
+    doc = yaml.safe_load(config.path.read_text())
+    doc["backends"]["vllm"]["upstream"] = doc["backends"]["ninfer"]["upstream"]
+    config.write(doc)
+    with pytest.raises(ValueError, match="share port"):
+        ModelRegistry.from_file(config.path)
+
+
+@pytest.mark.asyncio
+async def test_standalone_llamacpp_model_unload_stops_the_process(tmp_path: Path):
+    config = make_config(tmp_path, watch_config=False)
+    doc = yaml.safe_load(config.path.read_text())
+    doc["backends"]["ninfer"]["adapter"] = "llamacpp"
+    doc["backends"]["ninfer"]["resident"] = True
+    config.write(doc)
+    registry = ModelRegistry.from_file(config.path)
+    manager = RouterManager(registry)
+    await manager.startup()
+    app = create_app(registry, manager=manager, manage_lifespan=False)
+    try:
+        lease = await manager.acquire("sidecar")
+        await lease.release()
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://router") as client:
+            response = await client.post("/models/unload", json={"model": "sidecar"})
+        assert response.status_code == 200
+        assert response.json() == {"success": True, "stopped": True}
+        assert not manager.adapters["ninfer"].is_running()
+        assert not config.active()
+    finally:
+        if app.state.client is not None:
+            await app.state.client.aclose()
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("persisted", [False, True])
+async def test_startup_never_kills_an_external_listener_still_loading(tmp_path: Path, persisted: bool):
+    import socket
+
+    config = make_config(tmp_path, watch_config=False)
+    port = config.ports["vllm"]
+    # A server can listen while its model is loading and /health returns 503.
+    code = (
+        "from http.server import HTTPServer,BaseHTTPRequestHandler\n"
+        "import sys\n"
+        "class H(BaseHTTPRequestHandler):\n"
+        " def do_GET(self):\n"
+        "  self.send_response(503);self.send_header('Content-Length','0');self.end_headers()\n"
+        " def log_message(self,*args): pass\n"
+        "HTTPServer(('127.0.0.1',int(sys.argv[1])),H).serve_forever()\n"
+    )
+    proc = subprocess.Popen(
+        [sys.executable, "-u", "-c", code, str(port), "audit-loading-listener"],
+        start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    try:
+        for _ in range(100):
+            try:
+                with socket.create_connection(("127.0.0.1", port), timeout=0.1):
+                    break
+            except OSError:
+                await asyncio.sleep(0.02)
+        else:
+            pytest.fail("fake listener did not start")
+        doc = yaml.safe_load(config.path.read_text())
+        doc["backends"]["vllm"]["process_match"] = ["audit-loading-listener"]
+        config.write(doc)
+        if persisted:
+            state_dir = Path(doc["settings"]["state_dir"])
+            state_dir.mkdir(parents=True, exist_ok=True)
+            (state_dir / "state.json").write_text(json.dumps({
+                "active_backend": "vllm", "active_model": "big-vllm", "process": {"pid": proc.pid},
+            }))
+        manager = RouterManager(ModelRegistry.from_file(config.path))
+        with pytest.raises(RuntimeError, match="leaving it running"):
+            await manager.startup()
+        assert proc.poll() is None
+    finally:
+        if proc.poll() is None:
+            proc.terminate()
+        proc.wait(timeout=5)
 
 
 @pytest.mark.asyncio

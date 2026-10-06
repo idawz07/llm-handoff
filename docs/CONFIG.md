@@ -23,7 +23,7 @@ models:    { ... }   # public selector names -> backend
 | `llama_presets` | *(none)* | path to the llama.cpp preset `.ini`. Every `[Section]` becomes a public model ID |
 | `llama_models_snapshot` | *(none)* | cached `/v1/models` JSON from llama.cpp; used only for input modalities of preset IDs |
 | `drain_timeout_seconds` | `300` | how long a switch waits for in-flight requests/streams to finish before failing (never kills them) |
-| `shutdown_drain_timeout_seconds` | `30` | same, for service shutdown |
+| `shutdown_drain_timeout_seconds` | `300` | how long service shutdown waits for streams before stopping backends anyway; set longer than your longest generation and configure systemd/Docker stop timeout to exceed it plus backend stop time |
 | `stop_timeout_seconds` | `30` | SIGTERM grace before SIGKILL for a process group |
 | `startup_timeout_seconds` | `300` | global ceiling for "process up → healthy → model servable" |
 | `health_poll_seconds` | `0.5` | health polling interval |
@@ -65,6 +65,14 @@ own process group. With correct `process_match` entries the router can (a) reuse
 a healthy engine left by a previous router process, (b) adopt
 an engine that an external supervisor started while a switch was draining, and
 (c) refuse to start a duplicate that would fight for the same port and GPU.
+Each backend must have a distinct upstream port, even if URLs use different
+hostnames: listener discovery is port-based. A hot-reload rename cannot reuse
+another still-running backend's port; unload the old one first. Matching
+listeners that are not healthy yet are left running so a cold load can finish.
+
+Only `llamacpp` backends whose command includes `--models-preset` use llama.cpp's
+native child-model `/models/unload`; a standalone `llama-server` is stopped as
+a whole process by that endpoint.
 
 ---
 

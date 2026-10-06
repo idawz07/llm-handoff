@@ -28,7 +28,9 @@ settings:
   # finish, then stops the old process group. If a generation outlives this
   # timeout the switch fails loudly instead of killing the response.
   drain_timeout_seconds: 1800
-  shutdown_drain_timeout_seconds: 30
+  # During service stop, finish existing streams before killing processes.
+  # Systemd/Docker stop timeouts must exceed this plus backend stop time.
+  shutdown_drain_timeout_seconds: 1800
   stop_timeout_seconds: 45
   startup_timeout_seconds: 360
   health_poll_seconds: 0.5

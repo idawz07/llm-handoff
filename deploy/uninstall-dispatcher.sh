@@ -16,4 +16,8 @@ if grep -aEq 'LLAMA_MULTI_BACKEND_DISPATCHER|HANDOFF_ROUTER_DISPATCHER' "$REAL";
   exit 1
 fi
 mv -f -- "$REAL" "$TARGET"
+WRAPPER="$TARGET.handoff-dispatcher"
+if [[ -f "$WRAPPER" ]] && grep -aq 'HANDOFF_ROUTER_DISPATCHER' "$WRAPPER"; then
+  rm -f -- "$WRAPPER"
+fi
 printf 'Restored %s\n' "$TARGET"

@@ -26,7 +26,7 @@ class RouterSettings:
     llama_models_snapshot: Path | None = None
     llama_backend: str = "llamacpp"
     drain_timeout_seconds: float = 300.0
-    shutdown_drain_timeout_seconds: float = 30.0
+    shutdown_drain_timeout_seconds: float = 300.0
     stop_timeout_seconds: float = 30.0
     startup_timeout_seconds: float = 300.0
     health_poll_seconds: float = 0.5
@@ -145,7 +145,7 @@ class ModelRegistry:
             llama_models_snapshot=resolved_path(raw_settings.get("llama_models_snapshot")),
             llama_backend=str(raw_settings.get("llama_backend", "llamacpp")),
             drain_timeout_seconds=float(raw_settings.get("drain_timeout_seconds", 300)),
-            shutdown_drain_timeout_seconds=float(raw_settings.get("shutdown_drain_timeout_seconds", 30)),
+            shutdown_drain_timeout_seconds=float(raw_settings.get("shutdown_drain_timeout_seconds", 300)),
             stop_timeout_seconds=float(raw_settings.get("stop_timeout_seconds", 30)),
             startup_timeout_seconds=float(raw_settings.get("startup_timeout_seconds", 300)),
             health_poll_seconds=float(raw_settings.get("health_poll_seconds", 0.5)),
@@ -212,6 +212,19 @@ class ModelRegistry:
                     float(item["idle_ttl_seconds"]) if "idle_ttl_seconds" in item else None
                 ),
             )
+
+        # Discovery inspects listening *ports* (not addresses), and a backend
+        # process group must have exactly one owner. Two names on one port can
+        # otherwise adopt the same PID and later stop each other's live leases.
+        ports: dict[int, str] = {}
+        for name, backend in backends.items():
+            port = backend.port
+            if port in ports:
+                raise ValueError(
+                    f"backends {ports[port]!r} and {name!r} share port {port}; "
+                    "each backend needs a dedicated port"
+                )
+            ports[port] = name
 
         llama_backend = str(raw_settings.get("llama_backend", "llamacpp"))
         # llama.cpp's native multi-model router is the reference backend, but it

@@ -64,10 +64,23 @@ handoff-router --version
 
 ## 3. Configure
 
+From a **checkout** (the `config/` directory is not included in the pipx
+installation):
+
 ```bash
 mkdir -p ~/.config/handoff-router
 cp config/router-backends.example.yaml ~/.config/handoff-router/router-backends.yaml
 cp config/router-presets.example.ini   ~/.config/handoff-router/router-presets.ini
+$EDITOR ~/.config/handoff-router/router-backends.yaml
+```
+
+For a pipx-only install, download the examples from the repository:
+
+```bash
+mkdir -p ~/.config/handoff-router
+BASE=https://raw.githubusercontent.com/your-org/handoff-router/main/config
+curl -fL "$BASE/router-backends.example.yaml" -o ~/.config/handoff-router/router-backends.yaml
+curl -fL "$BASE/router-presets.example.ini" -o ~/.config/handoff-router/router-presets.ini
 $EDITOR ~/.config/handoff-router/router-backends.yaml
 ```
 
@@ -79,7 +92,9 @@ Three things to get right before the first start:
 2. **`backends.<name>.process_match`** — 2–4 literal substrings that uniquely
    identify that process's command line (`cmdline` is matched with *all* fragments
    present). This is what lets the router adopt a leftover process instead of
-   starting a duplicate that fights it for the port. Make them specific.
+   starting a duplicate that fights it for the port. Make them specific. Each
+   backend needs its **own port**; to rename a running backend, unload it and
+   wait for its requests to finish before reusing that port in a config reload.
 3. **`settings.min_free_vram_mib`** — see §6.
 
 Validate without touching the GPU:
@@ -161,7 +176,7 @@ will **not** work in this container. For Compose, set `ENGINES_DIR` and
 
 ```bash
 docker build -t handoff-router .
-docker run --rm --gpus all -p 8081:8081 \
+docker run --rm --gpus all --stop-timeout 2100 -p 8081:8081 \
   -e HANDOFF_ROUTER_API_KEY="$MY_KEY" \
   -v ~/.config/handoff-router:/config:ro \
   -v /absolute/path/to/container-compatible/engines:/engines:ro \
@@ -213,9 +228,11 @@ Behaviour of the shim:
 
 Rerun the installer **with both config and preset variables again** after any
 llama.cpp rebuild: a rebuild replaces `build/bin/llama-server` and removes the
-shim. Keep the checkout (or a stable copy of `deploy/dispatcher.sh`) at the path
-embedded in the installed shim. `uninstall-dispatcher.sh` atomically restores
-`.real` to `llama-server`; a `.legacy.*` copy is left for manual rollback.
+shim. The installer copies the dispatcher to
+`build/bin/llama-server.handoff-dispatcher` with permissions usable by a
+separate service account; the runtime does not depend on your checkout path.
+`uninstall-dispatcher.sh` atomically restores `.real` to `llama-server` and
+removes the installed helper; a `.legacy.*` copy is left for manual rollback.
 
 **Migrating from the llama.cpp in-tree `tools/backend-router`:** the package was
 renamed `backend_router` → `handoff_router` and now reads `--config` (the old
@@ -307,12 +324,20 @@ Pass criteria:
 | changed a **running** backend's `command` | staged until the next request to that backend, after its own leases drain |
 | removed a backend that is running but idle | marked `retired`; stopped by the reaper on its next poll. Selected/in-flight processes wait for a safe switch/drain |
 | llama.cpp rebuild (if you use the shim) | rerun the installer **with config and preset paths**, verify `.real`, then restart your unit |
-| `pip install --upgrade handoff-router` | restart the service (drains in-flight generations first) |
+| `pip install --upgrade handoff-router` | restart during a maintenance window; shutdown waits up to `shutdown_drain_timeout_seconds`, then stops backends even if a stream remains |
 | rollback | `pip install handoff-router==<old>` + restart; the `state.json` format is backward compatible |
 
 `settings.state_dir/state.json` is only crash-recovery metadata (active backend,
-pid, pgid, boot_id, command). Deleting it is safe: on next start the router
-discovers listeners and adopts or cleans up by itself.
+pid, pgid, boot_id, command). On the next start the router discovers listeners
+and adopts healthy copies. If a matching listener is still loading (unhealthy),
+startup fails **without killing it**; the service retries when it is ready.
+
+Unlike a model switch, service shutdown is bounded: after
+`shutdown_drain_timeout_seconds` it **will stop** backends even with live streams.
+For the example YAML that is 1800 seconds. The provided systemd units and
+Compose file allow 2100 seconds before forcibly killing the service; if you
+raise the drain timeout or run many sidecars, raise the service stop timeout too.
+Plan upgrades when no requests are active for the strongest guarantee.
 
 ---
 
@@ -339,7 +364,7 @@ discovers listeners and adopts or cleans up by itself.
 | Symptom | Cause | Fix |
 |---|---|---|
 | `503 backend_switch_error: GPU memory did not reach N MiB free` | the old backend's memory is still being released, or a foreign process holds the GPU | check `nvidia-smi`, lower `min_free_vram_mib`, or stop the foreign consumer; the error text includes the last observed free VRAM |
-| `backend X port is held by external pid N that is not healthy` | a hand-started engine occupies the port but fails its health check | stop it, or fix `process_match` if it belongs to a *different* service |
+| `backend X port is held by external pid N that is not healthy` | a hand-started engine occupies the port but fails its health check | wait if it is loading; otherwise stop it, or fix `process_match` if it belongs to a *different* service |
 | `failed to stop backend X` | the process group survived SIGTERM/SIGKILL | check `journalctl` and launcher child-process handling; do not retry a new large backend until the group is gone |
 | model list shows a llama preset you deleted | cached metadata from `llama_models_snapshot` | delete the snapshot file, or keep it — it only feeds modalities for non-selector IDs |
 | a switch hangs, then `timed out waiting for active request(s) to drain` | a client is streaming longer than `drain_timeout_seconds` | raise the timeout, or fix the client that never closes the stream |
