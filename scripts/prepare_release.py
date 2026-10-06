@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Replace provisional GitHub URLs once the owner/repo slug has been chosen.
+"""Replace provisional or canonical GitHub URLs for a release/fork.
 
-Usage: python3 scripts/prepare_release.py OWNER/handoff-router
+Usage: python3 scripts/prepare_release.py OWNER/REPOSITORY
        python3 scripts/prepare_release.py --check
 """
 
@@ -14,6 +14,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 PLACEHOLDER = "your-org" + "/handoff-router"
+CANONICAL = "idawz07/llm-handoff"
 
 
 def tracked_files() -> list[Path]:
@@ -23,7 +24,7 @@ def tracked_files() -> list[Path]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("repository", nargs="?", help="GitHub owner/repository, e.g. dao/handoff-router")
+    parser.add_argument("repository", nargs="?", help="GitHub owner/repository, e.g. idawz07/llm-handoff")
     parser.add_argument("--check", action="store_true", help="fail if any provisional URLs remain")
     args = parser.parse_args()
     if not args.check and (not args.repository or not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", args.repository)):
@@ -36,11 +37,14 @@ def main() -> None:
             content = path.read_text(encoding="utf-8")
         except UnicodeDecodeError:
             continue
-        if PLACEHOLDER not in content:
+        if args.check:
+            if PLACEHOLDER in content:
+                found.append(path.relative_to(ROOT))
             continue
-        found.append(path.relative_to(ROOT))
-        if not args.check:
-            path.write_text(content.replace(PLACEHOLDER, args.repository), encoding="utf-8")
+        updated = content.replace(PLACEHOLDER, args.repository).replace(CANONICAL, args.repository)
+        if updated != content:
+            found.append(path.relative_to(ROOT))
+            path.write_text(updated, encoding="utf-8")
     if args.check:
         if found:
             parser.exit(1, "Provisional GitHub URLs remain in: " + ", ".join(map(str, found)) + "\n")

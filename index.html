@@ -105,7 +105,7 @@
         <a href="#ops">Operations</a>
         <a href="#compare">Comparison</a>
         <a href="#quickstart">Quickstart</a>
-        <a href="https://github.com/your-org/handoff-router">GitHub</a>
+        <a href="https://github.com/idawz07/llm-handoff">GitHub</a>
       </div>
     </nav>
   </div>
@@ -124,8 +124,8 @@
     </p>
     <div class="row">
       <a class="btn primary" href="#quickstart">Get running in 5 steps</a>
-      <a class="btn ghost" href="https://github.com/your-org/handoff-router/blob/main/docs/COMPARISON.md">How it differs from llama-swap</a>
-      <a class="btn ghost" href="https://github.com/your-org/handoff-router">Source</a>
+      <a class="btn ghost" href="https://github.com/idawz07/llm-handoff/blob/main/docs/COMPARISON.md">How it differs from llama-swap</a>
+      <a class="btn ghost" href="https://github.com/idawz07/llm-handoff">Source</a>
     </div>
     <p class="meta" style="margin-top:26px">
       Python · MIT · no GPU needed for the integration suite · runs on llama.cpp's own
@@ -224,7 +224,7 @@
           <li>A config edit costing you a cold load.</li>
           <li>A public model id leaking the upstream engine's name in a stream.</li>
         </ul>
-        <p style="margin-top:14px"><a href="https://github.com/your-org/handoff-router/blob/main/docs/ARCHITECTURE.md">
+        <p style="margin-top:14px"><a href="https://github.com/idawz07/llm-handoff/blob/main/docs/ARCHITECTURE.md">
           Read the ten invariants and the two races that shaped this code →</a></p>
       </div>
     </div>
@@ -365,7 +365,7 @@ GET  /logs/llamacpp?lines=200</code></pre>
       expressive than our <code>resident</code>/<code>evict_cost</code> pair; its streamed
       logs and web UI are better than ours; Ollama's VRAM-fit scheduling is smarter than our
       threshold. If you maintain any of them and want the adoption + process-group + VRAM-gate
-      pieces, take them — the code is MIT, and <a href="https://github.com/your-org/handoff-router/blob/main/docs/COMPARISON.md">the comparison doc</a>
+      pieces, take them — the code is MIT, and <a href="https://github.com/idawz07/llm-handoff/blob/main/docs/COMPARISON.md">the comparison doc</a>
       lists exactly where each idea came from.
     </div>
   </div>
@@ -375,7 +375,7 @@ GET  /logs/llamacpp?lines=200</code></pre>
   <div class="wrap">
     <h2>Quickstart</h2>
     <ol class="steps">
-      <li><div><code>pipx install git+https://github.com/your-org/handoff-router.git</code></div></li>
+      <li><div><code>pipx install git+https://github.com/idawz07/llm-handoff.git</code></div></li>
       <li><div><code>mkdir -p ~/.config/handoff-router</code> then copy
         <code>config/router-backends.example.yaml</code> there and set each engine's
         <code>command</code>, <code>upstream</code>, and <code>process_match</code>.</div></li>
@@ -443,10 +443,10 @@ curl -H "Authorization: Bearer $KEY" localhost:8081/router/status</code></pre>
     Built on llama.cpp's own multi-model router; ideas borrowed openly from llama-swap,
     Ollama, and GPUStack.
     <div class="row">
-      <a class="btn ghost" href="https://github.com/your-org/handoff-router/blob/main/docs/DEPLOY.md">Deploy manual</a>
-      <a class="btn ghost" href="https://github.com/your-org/handoff-router/blob/main/docs/CONFIG.md">Config reference</a>
-      <a class="btn ghost" href="https://github.com/your-org/handoff-router/blob/main/docs/ARCHITECTURE.md">Architecture &amp; invariants</a>
-      <a class="btn ghost" href="https://github.com/your-org/handoff-router">GitHub</a>
+      <a class="btn ghost" href="https://github.com/idawz07/llm-handoff/blob/main/docs/DEPLOY.md">Deploy manual</a>
+      <a class="btn ghost" href="https://github.com/idawz07/llm-handoff/blob/main/docs/CONFIG.md">Config reference</a>
+      <a class="btn ghost" href="https://github.com/idawz07/llm-handoff/blob/main/docs/ARCHITECTURE.md">Architecture &amp; invariants</a>
+      <a class="btn ghost" href="https://github.com/idawz07/llm-handoff">GitHub</a>
     </div>
   </div>
 </footer>

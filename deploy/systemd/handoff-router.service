@@ -6,7 +6,7 @@
 # existing llama.cpp router install - see docs/DEPLOY.md "Option B: shim".
 [Unit]
 Description=Handoff Router (one GPU, many engines)
-Documentation=https://github.com/your-org/handoff-router/tree/main/docs
+Documentation=https://github.com/idawz07/llm-handoff/tree/main/docs
 After=network-online.target
 Wants=network-online.target
 

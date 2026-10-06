@@ -6,15 +6,14 @@ load or a frozen workstation. Tests and invariants matter more than volume.
 ## Setup
 
 ```bash
-git clone https://github.com/your-org/handoff-router && cd handoff-router
+git clone https://github.com/idawz07/llm-handoff && cd llm-handoff
 pip install -e ".[dev]"
 pytest -q            # fake backends, no GPU
-handoff-router --config config/router-backends.example.yaml --print-config
+# To print a config, copy the example YAML and presets as in docs/DEPLOY.md §3.
 ```
 
-Before the **first public release**, the maintainer runs
-`python3 scripts/prepare_release.py OWNER/handoff-router` and then `--check` to
-replace all provisional URLs. Contributors need not rewrite these links in PRs.
+Links point to the canonical repository. Fork maintainers can run
+`python3 scripts/prepare_release.py OWNER/REPOSITORY` to rewrite them.
 
 ## Where to work
 
@@ -43,8 +42,8 @@ replace all provisional URLs. Contributors need not rewrite these links in PRs.
 
 `index.html` at the repository root is the GitHub Pages site (self-contained: no
 build step, no external assets, `.nojekyll` is present). Publish it with
-**Settings → Pages → Deploy from a branch → `main` → `/ (root)`**. Update the
-the GitHub URLs via `scripts/prepare_release.py` before publishing. Keep the
+**Settings → Pages → Deploy from a branch → `main` → `/ (root)`**. Fork
+maintainers should update GitHub URLs before publishing. Keep the
 comparison section factual: it is the part people judge us on.
 
 ## Test expectations

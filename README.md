@@ -56,10 +56,10 @@ forwarded chunk by chunk; only the `model` field is rewritten.
 ## Quickstart
 
 ```bash
-pipx install git+https://github.com/your-org/handoff-router.git
+pipx install git+https://github.com/idawz07/llm-handoff.git
 
 mkdir -p ~/.config/handoff-router
-BASE=https://raw.githubusercontent.com/your-org/handoff-router/main/config
+BASE=https://raw.githubusercontent.com/idawz07/llm-handoff/main/config
 curl -o ~/.config/handoff-router/router-backends.yaml \
   $BASE/router-backends.example.yaml
 curl -o ~/.config/handoff-router/router-presets.ini \
@@ -149,11 +149,11 @@ think they do better and would happily steal.
 
 ## Publishing
 
-Choose the GitHub owner/repository before publishing; the URLs deliberately
-remain provisional until then:
+The canonical repository is [idawz07/llm-handoff](https://github.com/idawz07/llm-handoff).
+Fork maintainers can rewrite links before publishing their fork:
 
 ```bash
-python3 scripts/prepare_release.py OWNER/handoff-router
+python3 scripts/prepare_release.py OWNER/REPOSITORY
 python3 scripts/prepare_release.py --check
 ```
 

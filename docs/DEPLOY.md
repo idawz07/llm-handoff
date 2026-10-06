@@ -43,14 +43,14 @@ streams pass through chunk-by-chunk.
 pipx install handoff-router
 
 # or straight from the repository - what works today
-pipx install git+https://github.com/your-org/handoff-router.git
+pipx install git+https://github.com/idawz07/llm-handoff.git
 
 # or, in a venv
 python -m venv ~/.venvs/handoff-router && source ~/.venvs/handoff-router/bin/activate
-pip install git+https://github.com/your-org/handoff-router.git
+pip install git+https://github.com/idawz07/llm-handoff.git
 
 # from a checkout (development)
-git clone https://github.com/your-org/handoff-router && cd handoff-router
+git clone https://github.com/idawz07/llm-handoff && cd llm-handoff
 pip install -e ".[dev]"
 ```
 
@@ -78,7 +78,7 @@ For a pipx-only install, download the examples from the repository:
 
 ```bash
 mkdir -p ~/.config/handoff-router
-BASE=https://raw.githubusercontent.com/your-org/handoff-router/main/config
+BASE=https://raw.githubusercontent.com/idawz07/llm-handoff/main/config
 curl -fL "$BASE/router-backends.example.yaml" -o ~/.config/handoff-router/router-backends.yaml
 curl -fL "$BASE/router-presets.example.ini" -o ~/.config/handoff-router/router-presets.ini
 $EDITOR ~/.config/handoff-router/router-backends.yaml
